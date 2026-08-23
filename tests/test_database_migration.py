@@ -42,6 +42,12 @@ FOLDER_SECTIONS_DROP_AUTH_USERS_FKEY = (
     / "migrations"
     / "20260821120000_drop_folder_sections_auth_users_fkey.sql"
 )
+DROP_OBSOLETE_CLEAR_FOLDER_LINKS = (
+    Path(__file__).parent.parent
+    / "supabase"
+    / "migrations"
+    / "20260823140000_drop_obsolete_clear_folder_links.sql"
+)
 
 
 def test_resource_migration_creates_expected_tables() -> None:
@@ -135,3 +141,21 @@ def test_folder_sections_drop_auth_users_fkey_keeps_folder_ownership() -> None:
     assert "delete from bookmark." not in sql
     assert "drop table" not in sql
     assert "drop constraint folder_sections_folder_id_user_id_fkey" not in sql
+
+
+def test_drop_obsolete_clear_folder_links_removes_section_id_trigger() -> None:
+    sql = DROP_OBSOLETE_CLEAR_FOLDER_LINKS.read_text()
+    statements = "\n".join(
+        line
+        for line in sql.splitlines()
+        if line.strip() and not line.lstrip().startswith("--")
+    )
+
+    assert (
+        "drop trigger if exists folders_clear_item_links on bookmark.folders"
+        in statements
+    )
+    assert "drop function if exists bookmark.clear_folder_links()" in statements
+    assert "delete from bookmark." not in statements
+    assert "drop table" not in statements
+    assert "section_id" not in statements
