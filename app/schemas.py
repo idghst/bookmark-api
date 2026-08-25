@@ -1,4 +1,6 @@
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from app.core.url_validation import require_http_url
 
 
 class AuthMeOut(BaseModel):
@@ -36,6 +38,11 @@ class BookmarkCreate(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
+    @field_validator("url")
+    @classmethod
+    def require_http_bookmark_url(cls, value: str) -> str:
+        return require_http_url(value)
+
 
 class BookmarkUpdate(BaseModel):
     title: str | None = None
@@ -47,6 +54,13 @@ class BookmarkUpdate(BaseModel):
     folder_section_id: str | None = Field(default=None, alias="folderSectionId")
 
     model_config = ConfigDict(populate_by_name=True)
+
+    @field_validator("url")
+    @classmethod
+    def require_http_bookmark_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return require_http_url(value)
 
 
 class FolderOut(BaseModel):

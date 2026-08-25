@@ -83,3 +83,32 @@ def require_http_origin(value: object, *, allow_root_path: bool) -> str:
     ):
         raise ValueError("must be a concrete HTTP(S) origin")
     return value
+
+
+def require_http_url(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or "\\" in value
+        or any(character.isspace() for character in value)
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError("must be an HTTP(S) URL")
+
+    try:
+        raw_url = urlsplit(value)
+        raw_port = raw_url.port
+    except ValueError as error:
+        raise ValueError("must use a valid authority") from error
+    if (
+        raw_url.scheme not in {"http", "https"}
+        or not raw_url.netloc
+        or raw_url.netloc.endswith(":")
+    ):
+        raise ValueError("must be an HTTP(S) URL")
+    if raw_port is not None and not 0 < raw_port <= 65535:
+        raise ValueError("must use a valid port")
+    if raw_url.username or raw_url.password or not has_valid_host(raw_url.hostname):
+        raise ValueError("must be an HTTP(S) URL")
+    return value

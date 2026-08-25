@@ -807,6 +807,20 @@ def test_bookmark_creation_assigns_folder_section_in_same_folder() -> None:
     assert "section_id" not in fake.queries[2].payload
 
 
+def test_bookmark_creation_rejects_non_http_urls() -> None:
+    fake = FakeSupabase()
+
+    response = _client(fake).post(
+        "/api/bookmarks",
+        json={"title": "Example", "url": "javascript:alert(1)"},
+        headers={"Authorization": "Bearer test"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "validation_error"
+    assert fake.queries == []
+
+
 def test_bookmark_creation_rejects_folder_section_from_another_folder() -> None:
     other = {**FOLDER_SECTION, "folder_id": "folder-2"}
     fake = FakeSupabase([other])

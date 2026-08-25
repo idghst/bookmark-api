@@ -7,7 +7,7 @@ from app.core.config import (
     get_settings,
     resolve_app_env,
 )
-from app.core.url_validation import require_http_origin
+from app.core.url_validation import require_http_origin, require_http_url
 
 
 def test_schema_cannot_be_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -135,6 +135,28 @@ def test_cors_rejects_non_origin_values(cors_origin: str) -> None:
 )
 def test_cors_allows_concrete_origins(cors_origin: str) -> None:
     assert require_http_origin(cors_origin, allow_root_path=False) == cors_origin
+
+
+@pytest.mark.parametrize(
+    "bookmark_url",
+    [
+        "javascript:alert(1)",
+        "file:///etc/passwd",
+        "https://user:pass@example.com",
+        "example.com",
+        "https://",
+    ],
+)
+def test_bookmark_url_rejects_non_http_values(bookmark_url: str) -> None:
+    with pytest.raises(ValueError):
+        require_http_url(bookmark_url)
+
+
+def test_bookmark_url_allows_http_path_and_query() -> None:
+    assert (
+        require_http_url("https://example.com/docs?q=1#section")
+        == "https://example.com/docs?q=1#section"
+    )
 
 
 @pytest.mark.parametrize(
