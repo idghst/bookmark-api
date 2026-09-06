@@ -1,941 +1,346 @@
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any, cast
+from uuid import UUID
 
-import httpx
+import psycopg
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-from postgrest.exceptions import APIError
-from supabase_auth.types import User
 
-from app.integrations.supabase import AuthContext, get_resource_auth_context
-from app.main import create_app
-from supabase import AsyncClient
+from tests.db_fakes import Connection
+from tests.test_auth import HEADERS, OWNER, client
 
+ID = "00000000-0000-0000-0000-000000000010"
+FOLDER_ID = "00000000-0000-0000-0000-000000000020"
+SECTION_ID = "00000000-0000-0000-0000-000000000030"
 BOOKMARK = {
-    "id": "bookmark-1",
+    "id": UUID(ID),
+    "user_id": UUID(OWNER),
     "title": "Example",
     "url": "https://example.com",
     "description": None,
     "is_favorite": False,
     "color": None,
-    "created_at": "2026-01-01T00:00:00+00:00",
-    "updated_at": "2026-01-01T00:00:00+00:00",
-    "user_id": "user-123",
     "folder_id": None,
+    "folder_section_id": None,
     "position": 0,
+    "created_at": datetime(2026, 1, 1, tzinfo=UTC),
+    "updated_at": datetime(2026, 1, 1, tzinfo=UTC),
 }
 FOLDER = {
-    "id": "folder-1",
+    "id": ID,
+    "user_id": OWNER,
     "name": "Work",
     "color": None,
     "section_id": None,
     "position": 0,
-    "user_id": "user-123",
 }
-SECTION = {
-    "id": "section-1",
-    "name": "Reading",
-    "color": None,
-    "position": 0,
-    "user_id": "user-123",
-}
-FOLDER_SECTION = {
-    "id": "folder-section-1",
-    "name": "읽을 글",
-    "color": None,
-    "folder_id": "folder-1",
-    "position": 0,
-    "user_id": "user-123",
-}
+SECTION = {"id": ID, "user_id": OWNER, "name": "Read", "color": None, "position": 0}
+FOLDER_SECTION = {**SECTION, "folder_id": FOLDER_ID}
+CASES = [
+    (
+        "bookmarks",
+        "items",
+        BOOKMARK,
+        {"title": "Example", "url": "https://example.com"},
+    ),
+    ("folders", "folders", FOLDER, {"name": "Work"}),
+    ("sections", "sections", SECTION, {"name": "Read"}),
+    (
+        "folder-sections",
+        "folder_sections",
+        FOLDER_SECTION,
+        {"name": "Read", "folderId": FOLDER_ID},
+    ),
+]
 
 
-class FakeResponse:
-    def __init__(self, data: object) -> None:
-        self.data = data
-
-
-class FakeQuery:
-    def __init__(self, owner: "FakeSupabase", table: str) -> None:
-        self.owner = owner
-        self.table = table
-        self.action = ""
-        self.columns: tuple[str, ...] = ()
-        self.payload: object = None
-        self.filters: list[tuple[str, object]] = []
-        self.ordering: tuple[str, bool] | None = None
-        self.limit_size: int | None = None
-
-    def select(self, *columns: str) -> "FakeQuery":
-        self.action = "select"
-        self.columns = columns
-        return self
-
-    def insert(self, payload: object) -> "FakeQuery":
-        self.action = "insert"
-        self.payload = payload
-        return self
-
-    def update(self, payload: object) -> "FakeQuery":
-        self.action = "update"
-        self.payload = payload
-        return self
-
-    def delete(self) -> "FakeQuery":
-        self.action = "delete"
-        return self
-
-    def eq(self, column: str, value: object) -> "FakeQuery":
-        self.filters.append((column, value))
-        return self
-
-    def neq(self, column: str, value: object) -> "FakeQuery":
-        self.filters.append((f"{column}__neq", value))
-        return self
-
-    def is_(self, column: str, value: object) -> "FakeQuery":
-        self.filters.append((f"{column}__is", value))
-        return self
-
-    def order(self, column: str, *, desc: bool = False) -> "FakeQuery":
-        self.ordering = (column, desc)
-        return self
-
-    def limit(self, size: int) -> "FakeQuery":
-        self.limit_size = size
-        return self
-
-    async def execute(self) -> FakeResponse:
-        result = self.owner.results.pop(0)
-        if isinstance(result, Exception):
-            raise result
-        return FakeResponse(result)
-
-
-class FakeSupabase:
-    def __init__(self, *results: object) -> None:
-        self.results = list(results)
-        self.queries: list[FakeQuery] = []
-
-    def table(self, name: str) -> FakeQuery:
-        query = FakeQuery(self, name)
-        self.queries.append(query)
-        return query
-
-    def rpc(self, name: str, params: object) -> FakeQuery:
-        query = FakeQuery(self, f"rpc:{name}")
-        query.action = "rpc"
-        query.payload = params
-        self.queries.append(query)
-        return query
-
-
-class FakeHttpClient:
-    closed = False
-
-    async def aclose(self) -> None:
-        self.closed = True
-
-
-def _user() -> User:
-    return User.model_validate(
-        {
-            "id": "user-123",
-            "email": "user@example.com",
-            "app_metadata": {},
-            "user_metadata": {},
-            "aud": "authenticated",
-            "created_at": datetime(2026, 1, 1, tzinfo=UTC),
-        }
+def request(monkeypatch, conn, method, path, **kwargs):
+    return getattr(client(monkeypatch, conn, BOOKMARK_USER_ID=OWNER), method)(
+        path, headers=HEADERS, **kwargs
     )
 
 
-def _client(fake: FakeSupabase) -> TestClient:
-    app: FastAPI = create_app()
-
-    async def authenticated() -> AsyncIterator[AuthContext]:
-        yield AuthContext(user=_user(), client=cast(AsyncClient, fake))
-
-    app.dependency_overrides[get_resource_auth_context] = authenticated
-    return TestClient(app)
-
-
-def _assert_user_scoped(query: FakeQuery) -> None:
-    assert ("user_id", "user-123") in query.filters
-
-
-def test_legacy_health_alias() -> None:
-    response = TestClient(create_app()).get("/health")
-
+@pytest.mark.parametrize("path,table,row,payload", CASES)
+def test_crud_and_reorder_contract(monkeypatch, path, table, row, payload):
+    conn = Connection([row])
+    response = request(monkeypatch, conn, "get", "/api/" + path)
     assert response.status_code == 200
-    assert response.json() == {"status": "ok"}
-
-
-def test_resources_require_authentication() -> None:
-    response = TestClient(create_app()).get("/api/bookmarks")
-
-    assert response.status_code == 401
-    assert response.json()["code"] == "authentication_required"
-
-
-def test_resources_accept_configured_service_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from app.core.config import Settings
-    from app.integrations import supabase
-
-    fake = FakeSupabase(
-        [{"user_id": "user-123"}],
-        [],
-        [],
-        [],
-        [BOOKMARK],
-    )
-    http_client = FakeHttpClient()
-
-    async def create_client(*_: object) -> tuple[AsyncClient, httpx.AsyncClient]:
-        return cast(AsyncClient, fake), cast(httpx.AsyncClient, http_client)
-
-    monkeypatch.setattr(supabase, "_new_client", create_client)
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-        SUPABASE_SECRET_KEY="sb_secret_test",
-        BOOKMARK_API_KEY="bookmark-api-secret",
-    )
-
-    response = TestClient(create_app(settings)).get(
-        "/api/bookmarks",
-        headers={"X-Bookmark-Key": "bookmark-api-secret"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()[0]["id"] == "bookmark-1"
-    _assert_user_scoped(fake.queries[-1])
-    assert http_client.closed is True
-
-
-def test_resources_reject_invalid_service_key() -> None:
-    from app.core.config import Settings
-
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-        BOOKMARK_API_KEY="bookmark-api-secret",
-    )
-
-    response = TestClient(create_app(settings)).get(
-        "/api/bookmarks",
-        headers={"X-Bookmark-Key": "wrong-key"},
-    )
-
-    assert response.status_code == 401
-    assert response.json()["code"] == "invalid_api_key"
-
-
-@pytest.mark.parametrize(
-    ("path", "table", "row"),
-    [
-        ("/api/bookmarks", "items", BOOKMARK),
-        ("/api/folders", "folders", FOLDER),
-        ("/api/sections", "sections", SECTION),
-        ("/api/folder-sections", "folder_sections", FOLDER_SECTION),
-    ],
-)
-def test_lists_are_user_scoped(path: str, table: str, row: dict[str, Any]) -> None:
-    fake = FakeSupabase([row])
-
-    response = _client(fake).get(path, headers={"Authorization": "Bearer test"})
-
-    assert response.status_code == 200
-    assert len(response.json()) == 1
-    assert fake.queries[0].table == table
-    assert fake.queries[0].ordering == ("position", False)
-    _assert_user_scoped(fake.queries[0])
-
-
-@pytest.mark.parametrize(
-    ("path", "payload", "table", "row"),
-    [
-        (
-            "/api/bookmarks",
-            {"title": "Example", "url": "https://example.com"},
-            "items",
-            BOOKMARK,
-        ),
-        ("/api/folders", {"name": "Work"}, "folders", FOLDER),
-        (
-            "/api/sections",
-            {"name": "Reading"},
-            "sections",
-            SECTION,
-        ),
-    ],
-)
-def test_creates_are_user_scoped(
-    path: str,
-    payload: dict[str, Any],
-    table: str,
-    row: dict[str, Any],
-) -> None:
-    positioned_row = {**row, "position": 3}
-    fake = FakeSupabase([{"position": 2}], [positioned_row])
-
-    response = _client(fake).post(
-        path,
-        json=payload,
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 201
-    assert fake.queries[0].table == table
-    assert fake.queries[0].ordering == ("position", True)
-    assert fake.queries[0].limit_size == 1
-    _assert_user_scoped(fake.queries[0])
-    assert isinstance(fake.queries[1].payload, dict)
-    assert fake.queries[1].payload["user_id"] == "user-123"
-    assert fake.queries[1].payload["position"] == 3
-
-
-def test_bookmark_creation_preserves_color() -> None:
-    bookmark = {**BOOKMARK, "color": "#64748B"}
-    fake = FakeSupabase([], [bookmark])
-
-    response = _client(fake).post(
-        "/api/bookmarks",
-        json={"title": "Example", "url": "https://example.com", "color": "#64748B"},
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 201
-    assert response.json()["color"] == "#64748B"
-    assert "sectionId" not in response.json()
-    assert isinstance(fake.queries[1].payload, dict)
-    assert fake.queries[1].payload["color"] == "#64748B"
-    assert "section_id" not in fake.queries[1].payload
-
-
-def test_folder_creation_preserves_color() -> None:
-    folder = {**FOLDER, "color": "#123456"}
-    fake = FakeSupabase([], [folder])
-
-    response = _client(fake).post(
-        "/api/folders",
-        json={"name": "Work", "color": "#123456"},
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 201
-    assert isinstance(fake.queries[1].payload, dict)
-    assert fake.queries[1].payload["color"] == "#123456"
-
-
-def test_section_creation_preserves_color() -> None:
-    section = {**SECTION, "color": "#db2777"}
-    fake = FakeSupabase([], [section])
-
-    response = _client(fake).post(
-        "/api/sections",
-        json={"name": "Reading", "color": "#db2777"},
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 201
-    assert response.json()["color"] == "#db2777"
-    assert "folderId" not in response.json()
-    assert isinstance(fake.queries[1].payload, dict)
-    assert fake.queries[1].payload["color"] == "#db2777"
-    assert "folder_id" not in fake.queries[1].payload
-
-
-def test_folder_creation_scopes_position_to_its_section() -> None:
-    folder = {**FOLDER, "id": "folder-2", "section_id": "section-1", "position": 3}
-    fake = FakeSupabase([SECTION], [{"position": 2}], [folder])
-
-    response = _client(fake).post(
-        "/api/folders",
-        json={"name": "Work", "sectionId": "section-1"},
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 201
-    assert fake.queries[0].table == "sections"
-    _assert_user_scoped(fake.queries[0])
-    assert ("id", "section-1") in fake.queries[0].filters
-    assert fake.queries[1].table == "folders"
-    assert ("section_id", "section-1") in fake.queries[1].filters
-    assert isinstance(fake.queries[2].payload, dict)
-    assert fake.queries[2].payload["section_id"] == "section-1"
-    assert fake.queries[2].payload["position"] == 3
-
-
-def test_folder_creation_rejects_unknown_section() -> None:
-    response = _client(FakeSupabase([])).post(
-        "/api/folders",
-        json={"name": "Work", "sectionId": "missing"},
-        headers={
-            "Authorization": "Bearer test",
-            "X-Request-ID": "req-create-missing-section",
-        },
-    )
-
-    assert response.status_code == 404
-    assert response.json() == {
-        "code": "resource_not_found",
-        "message": "Section not found",
-        "request_id": "req-create-missing-section",
-    }
-
-
-def test_folder_move_to_section_recalculates_position_at_destination_end() -> None:
-    destination = {**SECTION, "id": "section-2"}
-    moved = {**FOLDER, "section_id": "section-2", "position": 4}
-    fake = FakeSupabase([FOLDER], [destination], [{"position": 3}], [moved])
-
-    response = _client(fake).patch(
-        "/api/folders/folder-1",
-        json={"sectionId": "section-2"},
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["sectionId"] == "section-2"
-    assert response.json()["position"] == 4
-    assert ("section_id", "section-2") in fake.queries[2].filters
-    assert fake.queries[3].payload["section_id"] == "section-2"
-    assert fake.queries[3].payload["position"] == 4
-
-
-def test_folder_move_to_no_section_recalculates_position() -> None:
-    moved = {**FOLDER, "position": 2}
-    fake = FakeSupabase(
-        [{**FOLDER, "section_id": "section-1"}],
-        [{"position": 1}],
-        [moved],
-    )
-
-    response = _client(fake).patch(
-        "/api/folders/folder-1",
-        json={"sectionId": None},
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["sectionId"] is None
-    assert ("section_id__is", "null") in fake.queries[1].filters
-    assert fake.queries[2].payload["section_id"] is None
-    assert fake.queries[2].payload["position"] == 2
-
-
-def test_folder_move_rejects_unknown_section() -> None:
-    fake = FakeSupabase([FOLDER], [])
-
-    response = _client(fake).patch(
-        "/api/folders/folder-1",
-        json={"sectionId": "missing"},
-        headers={
-            "Authorization": "Bearer test",
-            "X-Request-ID": "req-missing-section",
-        },
-    )
-
-    assert response.status_code == 404
-    assert response.json() == {
-        "code": "resource_not_found",
-        "message": "Section not found",
-        "request_id": "req-missing-section",
-    }
-    assert len(fake.queries) == 2
-
-
-def test_folder_tree_endpoint_is_no_longer_served() -> None:
-    fake = FakeSupabase()
-    response = _client(fake).get(
-        "/api/folders/tree",
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 405
-    assert fake.queries == []
-
-
-@pytest.mark.parametrize(
-    ("path", "payload", "table", "row"),
-    [
-        (
-            "/api/bookmarks/bookmark-1",
-            {"title": "Updated"},
-            "items",
-            {**BOOKMARK, "title": "Updated"},
-        ),
-        (
-            "/api/folders/folder-1",
-            {"name": "Updated"},
-            "folders",
-            {**FOLDER, "name": "Updated"},
-        ),
-        (
-            "/api/sections/section-1",
-            {"name": "Updated"},
-            "sections",
-            {**SECTION, "name": "Updated"},
-        ),
-        (
-            "/api/folder-sections/folder-section-1",
-            {"name": "Updated"},
-            "folder_sections",
-            {**FOLDER_SECTION, "name": "Updated"},
-        ),
-    ],
-)
-def test_updates_are_user_scoped(
-    path: str,
-    payload: dict[str, Any],
-    table: str,
-    row: dict[str, Any],
-) -> None:
-    fake = FakeSupabase([row])
-
-    response = _client(fake).patch(
-        path,
-        json=payload,
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 200
-    assert fake.queries[0].table == table
-    assert ("id", path.rsplit("/", 1)[-1]) in fake.queries[0].filters
-    _assert_user_scoped(fake.queries[0])
-
-
-@pytest.mark.parametrize("color", ["#2166d7", None])
-def test_section_update_preserves_color(color: str | None) -> None:
-    section = {**SECTION, "color": color}
-    fake = FakeSupabase([section])
-
-    response = _client(fake).patch(
-        "/api/sections/section-1",
-        json={"color": color},
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["color"] == color
-    assert "folderId" not in response.json()
-    assert fake.queries[0].payload["color"] == color
-    assert "folder_id" not in fake.queries[0].payload
-
-
-def test_section_list_returns_color() -> None:
-    section = {**SECTION, "color": "#16a34a"}
-    fake = FakeSupabase([section])
-
-    response = _client(fake).get(
-        "/api/sections",
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == [
-        {
-            "id": "section-1",
-            "name": "Reading",
-            "color": "#16a34a",
-            "position": 0,
-            "userId": "user-123",
-        }
+    assert response.json()[0]["userId"] == OWNER
+    assert response.json()[0]["id"] == ID
+    assert '"bookmark"."' + table + '"' in conn.queries[0][0]
+    assert conn.queries[0][1] == [OWNER]
+
+    results = ([[FOLDER]] if path == "folder-sections" else []) + [
+        [{"position": 0}],
+        [row],
     ]
+    conn = Connection(*results)
+    response = request(monkeypatch, conn, "post", "/api/" + path, json=payload)
+    assert response.status_code == 201, response.text
+    assert OWNER in conn.queries[-1][1]
+    assert "RETURNING *" in conn.queries[-1][0]
+    assert conn.committed
 
-
-@pytest.mark.parametrize(
-    ("path", "table"),
-    [
-        ("/api/bookmarks/bookmark-1", "items"),
-        ("/api/sections/section-1", "sections"),
-        ("/api/folder-sections/folder-section-1", "folder_sections"),
-    ],
-)
-def test_deletes_are_user_scoped(path: str, table: str) -> None:
-    fake = FakeSupabase([{"id": path.rsplit("/", 1)[-1]}])
-
-    response = _client(fake).delete(
-        path,
-        headers={"Authorization": "Bearer test"},
+    conn = Connection([row])
+    field = "title" if path == "bookmarks" else "name"
+    response = request(
+        monkeypatch,
+        conn,
+        "patch",
+        f"/api/{path}/{ID}",
+        json={field: "Changed", "color": "#fff"},
     )
+    assert response.status_code == 200
+    assert conn.queries[-1][1][-2:] == [ID, OWNER]
 
+    conn = Connection([row], [row])
+    response = request(
+        monkeypatch,
+        conn,
+        "post",
+        f"/api/{path}/reorder",
+        json=[{"id": ID, "position": 2}, {"id": ID, "position": 3}],
+    )
     assert response.status_code == 204
-    assert fake.queries[0].table == table
-    _assert_user_scoped(fake.queries[0])
+    assert all(query[1][-2:] == [ID, OWNER] for query in conn.queries)
 
-
-def test_folder_delete_uses_atomic_destination_rpc() -> None:
-    fake = FakeSupabase([{"id": "folder-1"}])
-
-    response = _client(fake).delete(
-        "/api/folders/folder-1?destination_folder_id=folder-2",
-        headers={"Authorization": "Bearer test"},
+    results = (
+        [[row], [{"position": 0}], [], [], [row]] if path == "folders" else [[row]]
     )
-
+    conn = Connection(*results)
+    response = request(monkeypatch, conn, "delete", f"/api/{path}/{ID}")
     assert response.status_code == 204
-    assert fake.queries[0].table == "rpc:delete_folder"
-    assert fake.queries[0].payload == {
-        "p_folder_id": "folder-1",
-        "p_destination_folder_id": "folder-2",
-        "p_user_id": "user-123",
-    }
+    assert conn.queries[-1][1] == [ID, OWNER]
 
 
-def test_folder_delete_rejects_itself_as_destination() -> None:
-    fake = FakeSupabase()
-
-    response = _client(fake).delete(
-        "/api/folders/folder-1?destination_folder_id=folder-1",
-        headers={"Authorization": "Bearer test"},
+@pytest.mark.parametrize("path,table,row,payload", CASES)
+def test_missing_resources_and_atomic_reorder(monkeypatch, path, table, row, payload):
+    conn = Connection([])
+    response = request(
+        monkeypatch, conn, "patch", f"/api/{path}/{ID}", json={"color": "#fff"}
     )
-
-    assert response.status_code == 422
-    assert response.json()["code"] == "folder_destination_invalid"
-    assert fake.queries == []
-
-
-@pytest.mark.parametrize(
-    ("path", "table"),
-    [
-        ("/api/bookmarks/reorder", "items"),
-        ("/api/folders/reorder", "folders"),
-        ("/api/sections/reorder", "sections"),
-        ("/api/folder-sections/reorder", "folder_sections"),
-    ],
-)
-def test_reorders_are_user_scoped(path: str, table: str) -> None:
-    fake = FakeSupabase([{"id": "one"}], [{"id": "two"}])
-
-    response = _client(fake).post(
-        path,
-        json=[{"id": "one", "position": 1}, {"id": "two", "position": 2}],
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 204
-    assert [query.table for query in fake.queries] == [table, table]
-    assert all(("user_id", "user-123") in query.filters for query in fake.queries)
-
-
-@pytest.mark.parametrize(
-    ("path", "resource_name"),
-    [
-        ("/api/bookmarks/reorder", "Bookmark"),
-        ("/api/folders/reorder", "Folder"),
-        ("/api/sections/reorder", "Section"),
-        ("/api/folder-sections/reorder", "Folder section"),
-    ],
-)
-def test_reorder_missing_resource_uses_stable_404(
-    path: str, resource_name: str
-) -> None:
-    response = _client(FakeSupabase([])).post(
-        path,
-        json=[{"id": "missing", "position": 0}],
-        headers={"Authorization": "Bearer test", "X-Request-ID": "req-reorder-missing"},
-    )
-
     assert response.status_code == 404
-    assert response.json() == {
-        "code": "resource_not_found",
-        "message": f"{resource_name} not found",
-        "request_id": "req-reorder-missing",
-    }
-
-
-def test_missing_resource_uses_stable_404() -> None:
-    response = _client(FakeSupabase([])).delete(
-        "/api/bookmarks/missing",
-        headers={"Authorization": "Bearer test", "X-Request-ID": "req-missing"},
+    assert response.json()["code"] == "resource_not_found"
+    assert conn.rolled_back
+    conn = Connection([row], [])
+    response = request(
+        monkeypatch,
+        conn,
+        "post",
+        f"/api/{path}/reorder",
+        json=[{"id": ID, "position": 4}, {"id": ID, "position": 9}],
     )
-
     assert response.status_code == 404
-    assert response.json() == {
-        "code": "resource_not_found",
-        "message": "Bookmark not found",
-        "request_id": "req-missing",
-    }
+    assert conn.rolled_back and not conn.committed
 
 
 @pytest.mark.parametrize(
-    ("failure", "status_code", "code"),
+    "error,status,code",
     [
         (
-            APIError(
-                {
-                    "code": "42501",
-                    "message": "permission denied",
-                    "details": None,
-                    "hint": None,
-                }
-            ),
+            psycopg.errors.InsufficientPrivilege("private"),
             403,
             "database_access_denied",
         ),
-        (
-            APIError(
-                {
-                    "code": "PGRST000",
-                    "message": "internal details",
-                    "details": None,
-                    "hint": None,
-                }
-            ),
-            502,
-            "database_request_failed",
-        ),
-        (httpx.ConnectError("private upstream detail"), 503, "database_unavailable"),
+        (psycopg.errors.NoDataFound("private"), 404, "resource_not_found"),
+        (psycopg.errors.ForeignKeyViolation("private"), 409, "resource_conflict"),
+        (psycopg.errors.CheckViolation("private"), 409, "resource_conflict"),
+        (psycopg.errors.UniqueViolation("private"), 409, "resource_conflict"),
+        (psycopg.errors.NotNullViolation("private"), 409, "resource_conflict"),
+        (psycopg.errors.InvalidTextRepresentation("private"), 422, "validation_error"),
+        (psycopg.OperationalError("private"), 503, "database_unavailable"),
+        (psycopg.ProgrammingError("private"), 502, "database_request_failed"),
     ],
 )
-def test_database_failures_are_sanitized(
-    failure: Exception, status_code: int, code: str
-) -> None:
-    response = _client(FakeSupabase(failure)).get(
-        "/api/bookmarks",
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == status_code
+def test_database_errors_are_sanitized(monkeypatch, error, status, code):
+    response = request(monkeypatch, Connection(error), "get", "/api/bookmarks")
+    assert response.status_code == status
     assert response.json()["code"] == code
-    assert str(failure) not in response.text
+    assert set(response.json()) == {"code", "message", "request_id"}
+    assert "private" not in response.text
 
 
-def test_invalid_database_payload_is_sanitized() -> None:
-    response = _client(FakeSupabase({"not": "a list"})).get(
-        "/api/bookmarks",
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 502
+@pytest.mark.parametrize("rows", [None, [1]])
+def test_invalid_database_response(monkeypatch, rows):
+    response = request(monkeypatch, Connection(rows), "get", "/api/bookmarks")
     assert response.json()["code"] == "database_response_invalid"
 
 
-def test_folder_section_list_keeps_folder_scope_and_omits_sidebar_section_id() -> None:
-    fake = FakeSupabase([FOLDER_SECTION])
-
-    response = _client(fake).get(
-        "/api/folder-sections",
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 200
-    assert response.json() == [
-        {
-            "id": "folder-section-1",
-            "name": "읽을 글",
-            "color": None,
-            "folderId": "folder-1",
-            "position": 0,
-            "userId": "user-123",
-        }
-    ]
-    assert "sectionId" not in response.json()[0]
-
-
-def test_folder_section_creation_scopes_position_to_its_folder() -> None:
-    created = {**FOLDER_SECTION, "id": "folder-section-2", "position": 3}
-    fake = FakeSupabase([FOLDER], [{"position": 2}], [created])
-
-    response = _client(fake).post(
-        "/api/folder-sections",
-        json={"name": "읽을 글", "folderId": "folder-1"},
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 201
-    assert response.json()["folderId"] == "folder-1"
-    assert fake.queries[0].table == "folders"
-    assert ("id", "folder-1") in fake.queries[0].filters
-    assert fake.queries[1].table == "folder_sections"
-    assert ("folder_id", "folder-1") in fake.queries[1].filters
-    assert isinstance(fake.queries[2].payload, dict)
-    assert fake.queries[2].payload["folder_id"] == "folder-1"
-    assert fake.queries[2].payload["position"] == 3
-    assert "section_id" not in fake.queries[2].payload
-
-
-def test_folder_section_creation_rejects_unknown_folder() -> None:
-    response = _client(FakeSupabase([])).post(
-        "/api/folder-sections",
-        json={"name": "읽을 글", "folderId": "missing"},
-        headers={
-            "Authorization": "Bearer test",
-            "X-Request-ID": "req-create-missing-folder",
-        },
-    )
-
+def test_serialization_and_injection_safe_parameters(monkeypatch):
+    conn = Connection([BOOKMARK])
+    response = request(monkeypatch, conn, "get", "/api/bookmarks")
+    assert response.json()[0]["createdAt"] == "2026-01-01T00:00:00+00:00"
+    assert response.json()[0]["isFavorite"] is False
+    attack = "x' OR true; --"
+    conn = Connection([])
+    response = request(monkeypatch, conn, "delete", "/api/bookmarks/" + attack)
     assert response.status_code == 404
-    assert response.json() == {
-        "code": "resource_not_found",
-        "message": "Folder not found",
-        "request_id": "req-create-missing-folder",
-    }
+    assert attack not in conn.queries[0][0]
+    assert attack in conn.queries[0][1]
 
 
-def test_bookmark_creation_assigns_folder_section_in_same_folder() -> None:
-    bookmark = {
-        **BOOKMARK,
-        "folder_id": "folder-1",
-        "folder_section_id": "folder-section-1",
-    }
-    fake = FakeSupabase([FOLDER_SECTION], [{"position": 1}], [bookmark])
+@pytest.mark.parametrize("section_id", [SECTION_ID, None])
+def test_folder_move_recalculates_position(monkeypatch, section_id):
+    conn = Connection(
+        [FOLDER],
+        *([[SECTION]] if section_id else []),
+        *([[{"position": 7}]] if section_id else []),
+        [{**FOLDER, "section_id": section_id}],
+    )
+    response = request(
+        monkeypatch, conn, "patch", f"/api/folders/{ID}", json={"sectionId": section_id}
+    )
+    assert response.status_code == 200
+    if section_id:
+        assert 7 in conn.queries[-1][1]
 
-    response = _client(fake).post(
+
+def test_create_folder_in_section_and_unknown_parent(monkeypatch):
+    conn = Connection([SECTION], [{"position": 4}], [FOLDER])
+    assert (
+        request(
+            monkeypatch,
+            conn,
+            "post",
+            "/api/folders",
+            json={"name": "New", "sectionId": SECTION_ID},
+        ).status_code
+        == 201
+    )
+    conn = Connection([])
+    assert (
+        request(
+            monkeypatch,
+            conn,
+            "post",
+            "/api/folders",
+            json={"name": "New", "sectionId": SECTION_ID},
+        ).status_code
+        == 404
+    )
+    conn = Connection([])
+    assert (
+        request(
+            monkeypatch,
+            conn,
+            "post",
+            "/api/folder-sections",
+            json={"name": "New", "folderId": FOLDER_ID},
+        ).status_code
+        == 404
+    )
+
+
+@pytest.mark.parametrize(
+    "folder_section_id,matching",
+    [(SECTION_ID, True), (SECTION_ID, False), (None, True)],
+)
+def test_bookmark_parent_ownership_and_membership(
+    monkeypatch, folder_section_id, matching
+):
+    results = [[FOLDER]]
+    if folder_section_id:
+        results += [[{**FOLDER_SECTION, "folder_id": FOLDER_ID if matching else ID}]]
+    if matching:
+        results += [[{"position": 3}], [BOOKMARK]]
+    conn = Connection(*results)
+    response = request(
+        monkeypatch,
+        conn,
+        "post",
         "/api/bookmarks",
         json={
-            "title": "Example",
+            "title": "New",
             "url": "https://example.com",
-            "folderId": "folder-1",
-            "folderSectionId": "folder-section-1",
+            "folderId": FOLDER_ID,
+            "folderSectionId": folder_section_id,
         },
-        headers={"Authorization": "Bearer test"},
     )
-
-    assert response.status_code == 201
-    assert response.json()["folderSectionId"] == "folder-section-1"
-    assert "sectionId" not in response.json()
-    assert fake.queries[0].table == "folder_sections"
-    assert ("folder_id", "folder-1") in fake.queries[1].filters
-    assert ("folder_section_id", "folder-section-1") in fake.queries[1].filters
-    assert isinstance(fake.queries[2].payload, dict)
-    assert fake.queries[2].payload["folder_section_id"] == "folder-section-1"
-    assert "section_id" not in fake.queries[2].payload
+    assert response.status_code == (201 if matching else 409)
 
 
-def test_bookmark_creation_rejects_non_http_urls() -> None:
-    fake = FakeSupabase()
-
-    response = _client(fake).post(
+def test_bookmark_rejects_foreign_folder(monkeypatch):
+    response = request(
+        monkeypatch,
+        Connection([]),
+        "post",
         "/api/bookmarks",
-        json={"title": "Example", "url": "javascript:alert(1)"},
-        headers={"Authorization": "Bearer test"},
+        json={"title": "New", "url": "https://example.com", "folderId": FOLDER_ID},
     )
+    assert response.status_code == 404
 
+
+@pytest.mark.parametrize(
+    "updates,current,extra",
+    [
+        ({"folderId": FOLDER_ID}, BOOKMARK, [[FOLDER], [{"position": 3}]]),
+        (
+            {"folderId": None},
+            {**BOOKMARK, "folder_id": FOLDER_ID, "folder_section_id": SECTION_ID},
+            [[{"position": 3}]],
+        ),
+        (
+            {"folderSectionId": SECTION_ID},
+            {**BOOKMARK, "folder_id": FOLDER_ID},
+            [[FOLDER], [FOLDER_SECTION], [{"position": 3}]],
+        ),
+        (
+            {"folderSectionId": None},
+            {**BOOKMARK, "folder_id": FOLDER_ID, "folder_section_id": SECTION_ID},
+            [[FOLDER], [{"position": 3}]],
+        ),
+        ({"folderSectionId": None}, BOOKMARK, []),
+    ],
+)
+def test_bookmark_moves_and_clears_folder_section(monkeypatch, updates, current, extra):
+    conn = Connection([current], *extra, [BOOKMARK])
+    response = request(monkeypatch, conn, "patch", f"/api/bookmarks/{ID}", json=updates)
+    assert response.status_code == 200, response.text
+    if "folderId" in updates:
+        assert '"folder_section_id" = %s' in conn.queries[-1][0]
+
+
+def test_folder_delete_moves_bookmarks_and_deletes_sections(monkeypatch):
+    conn = Connection(
+        [FOLDER], [FOLDER], [{"position": 5}], [BOOKMARK], [BOOKMARK], [], [FOLDER]
+    )
+    response = request(
+        monkeypatch,
+        conn,
+        "delete",
+        f"/api/folders/{ID}?destination_folder_id={FOLDER_ID}",
+    )
+    assert response.status_code == 204
+    assert conn.queries[0][0].endswith("FOR UPDATE")
+    assert conn.queries[1][0].endswith("FOR UPDATE")
+    assert conn.queries[3][0].endswith("FOR UPDATE")
+    assert conn.committed
+    mutation = conn.queries[4]
+    assert mutation[1][0:3] == [FOLDER_ID, None, 5]
+    assert 'DELETE FROM "bookmark"."folder_sections"' in conn.queries[5][0]
+    assert all("user_id" in query for query, _ in conn.queries)
+
+
+def test_folder_delete_rejects_same_destination(monkeypatch):
+    conn = Connection()
+    response = request(
+        monkeypatch, conn, "delete", f"/api/folders/{ID}?destination_folder_id={ID}"
+    )
     assert response.status_code == 422
-    assert response.json()["code"] == "validation_error"
-    assert fake.queries == []
+    assert response.json()["code"] == "folder_destination_invalid"
+    assert not conn.queries
 
 
-def test_bookmark_creation_rejects_folder_section_from_another_folder() -> None:
-    other = {**FOLDER_SECTION, "folder_id": "folder-2"}
-    fake = FakeSupabase([other])
-
-    response = _client(fake).post(
+@pytest.mark.parametrize("url", ["javascript:alert(1)", None])
+def test_invalid_bookmark_url(monkeypatch, url):
+    response = request(
+        monkeypatch,
+        Connection(),
+        "post",
         "/api/bookmarks",
-        json={
-            "title": "Example",
-            "url": "https://example.com",
-            "folderId": "folder-1",
-            "folderSectionId": "folder-section-1",
-        },
-        headers={
-            "Authorization": "Bearer test",
-            "X-Request-ID": "req-cross-folder-section",
-        },
+        json={"title": "New", "url": url},
     )
-
-    assert response.status_code == 409
-    assert response.json() == {
-        "code": "resource_conflict",
-        "message": "Bookmark section must stay in the same folder",
-        "request_id": "req-cross-folder-section",
-    }
-    assert len(fake.queries) == 1
+    assert response.status_code == 422
 
 
-def test_bookmark_move_to_folder_section_recalculates_position() -> None:
-    destination = {**FOLDER_SECTION, "id": "folder-section-2"}
-    current = {**BOOKMARK, "folder_id": "folder-1"}
-    moved = {
-        **BOOKMARK,
-        "folder_id": "folder-1",
-        "folder_section_id": "folder-section-2",
-        "position": 4,
-    }
-    fake = FakeSupabase([current], [destination], [{"position": 3}], [moved])
-
-    response = _client(fake).patch(
-        "/api/bookmarks/bookmark-1",
-        json={"folderSectionId": "folder-section-2"},
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["folderSectionId"] == "folder-section-2"
-    assert response.json()["position"] == 4
-    assert ("folder_id", "folder-1") in fake.queries[2].filters
-    assert ("folder_section_id", "folder-section-2") in fake.queries[2].filters
-    assert fake.queries[3].payload["folder_section_id"] == "folder-section-2"
-    assert fake.queries[3].payload["position"] == 4
-
-
-def test_bookmark_move_to_no_folder_section_recalculates_position() -> None:
-    current = {
-        **BOOKMARK,
-        "folder_id": "folder-1",
-        "folder_section_id": "folder-section-1",
-    }
-    moved = {**BOOKMARK, "folder_id": "folder-1", "position": 2}
-    fake = FakeSupabase([current], [{"position": 1}], [moved])
-
-    response = _client(fake).patch(
-        "/api/bookmarks/bookmark-1",
-        json={"folderSectionId": None},
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["folderSectionId"] is None
-    assert ("folder_section_id__is", "null") in fake.queries[1].filters
-    assert fake.queries[2].payload["folder_section_id"] is None
-    assert fake.queries[2].payload["position"] == 2
-
-
-def test_bookmark_move_rejects_folder_section_from_another_folder() -> None:
-    current = {**BOOKMARK, "folder_id": "folder-1"}
-    other = {**FOLDER_SECTION, "folder_id": "folder-2"}
-    fake = FakeSupabase([current], [other])
-
-    response = _client(fake).patch(
-        "/api/bookmarks/bookmark-1",
-        json={"folderSectionId": "folder-section-1"},
-        headers={
-            "Authorization": "Bearer test",
-            "X-Request-ID": "req-move-cross-folder",
-        },
-    )
-
-    assert response.status_code == 409
-    assert response.json() == {
-        "code": "resource_conflict",
-        "message": "Bookmark section must stay in the same folder",
-        "request_id": "req-move-cross-folder",
-    }
-    assert len(fake.queries) == 2
-
-
-def test_bookmark_folder_change_clears_folder_section() -> None:
-    current = {
-        **BOOKMARK,
-        "folder_id": "folder-1",
-        "folder_section_id": "folder-section-1",
-    }
-    moved = {**BOOKMARK, "folder_id": "folder-2", "position": 1}
-    fake = FakeSupabase([current], [{"position": 0}], [moved])
-
-    response = _client(fake).patch(
-        "/api/bookmarks/bookmark-1",
-        json={"folderId": "folder-2"},
-        headers={"Authorization": "Bearer test"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["folderId"] == "folder-2"
-    assert response.json()["folderSectionId"] is None
-    assert fake.queries[2].payload["folder_id"] == "folder-2"
-    assert fake.queries[2].payload["folder_section_id"] is None
+def test_folder_tree_stays_removed(monkeypatch):
+    response = request(monkeypatch, Connection(), "get", "/api/folders/tree")
+    assert response.status_code == 405

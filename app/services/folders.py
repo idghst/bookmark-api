@@ -2,23 +2,28 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.errors import ApiError
-from app.integrations.supabase import AuthContext
+from app.integrations.postgres import AuthContext
 from app.schemas import (
     FolderCreate,
     FolderOut,
     FolderUpdate,
     PositionUpdate,
 )
-from app.services._db import TABLES, ensure_row, execute, next_position, now, reorder
+from app.services._db import (
+    TABLES,
+    delete,
+    ensure_row,
+    insert,
+    next_position,
+    now,
+    reorder,
+    select,
+    update,
+)
 
 
 async def list_folders(auth: AuthContext) -> list[FolderOut]:
-    rows = await execute(
-        auth.client.table(TABLES["folders"])
-        .select("*")
-        .eq("user_id", auth.user.id)
-        .order("position")
-    )
+    rows = await select(auth, TABLES["folders"])
     folders = [FolderOut(**row) for row in rows]
     return sorted(
         folders,
@@ -31,23 +36,15 @@ async def list_folders(auth: AuthContext) -> list[FolderOut]:
     )
 
 
-async def ensure_folder(folder_id: str, auth: AuthContext) -> None:
-    rows = await execute(
-        auth.client.table(TABLES["folders"])
-        .select("id")
-        .eq("id", folder_id)
-        .eq("user_id", auth.user.id)
-    )
+async def ensure_folder(
+    folder_id: str, auth: AuthContext, *, lock: bool = False
+) -> None:
+    rows = await select(auth, TABLES["folders"], id=folder_id, for_update=lock)
     ensure_row(rows, "Folder")
 
 
 async def ensure_section(section_id: str, auth: AuthContext) -> None:
-    rows = await execute(
-        auth.client.table(TABLES["sections"])
-        .select("id")
-        .eq("id", section_id)
-        .eq("user_id", auth.user.id)
-    )
+    rows = await select(auth, TABLES["sections"], id=section_id)
     ensure_row(rows, "Section")
 
 
@@ -72,7 +69,7 @@ async def create_folder(
         "updated_at": timestamp,
         "user_id": auth.user.id,
     }
-    rows = await execute(auth.client.table(TABLES["folders"]).insert(row).select("*"))
+    rows = await insert(auth, TABLES["folders"], row)
     return FolderOut(**ensure_row(rows, "Folder"))
 
 
@@ -84,12 +81,7 @@ async def update_folder(
     updates = payload.model_dump(by_alias=False, exclude_unset=True)
     if "section_id" in updates:
         current = ensure_row(
-            await execute(
-                auth.client.table(TABLES["folders"])
-                .select("id,section_id")
-                .eq("id", folder_id)
-                .eq("user_id", auth.user.id)
-            ),
+            await select(auth, TABLES["folders"], id=folder_id),
             "Folder",
         )
         section_id = updates["section_id"]
@@ -102,13 +94,7 @@ async def update_folder(
                 section_id=section_id,
             )
     updates["updated_at"] = now()
-    rows = await execute(
-        auth.client.table(TABLES["folders"])
-        .update(updates)
-        .eq("id", folder_id)
-        .eq("user_id", auth.user.id)
-        .select("*")
-    )
+    rows = await update(auth, TABLES["folders"], updates, id=folder_id)
     return FolderOut(**ensure_row(rows, "Folder"))
 
 
@@ -123,17 +109,32 @@ async def delete_folder(
             "folder_destination_invalid",
             "A folder cannot be its own deletion destination",
         )
-    rows = await execute(
-        auth.client.rpc(
-            "delete_folder",
-            {
-                "p_folder_id": folder_id,
-                "p_destination_folder_id": destination_folder_id,
-                "p_user_id": auth.user.id,
-            },
-        )
+    await ensure_folder(folder_id, auth, lock=True)
+    if destination_folder_id is not None:
+        await ensure_folder(destination_folder_id, auth, lock=True)
+    position = await next_position(
+        auth,
+        TABLES["bookmarks"],
+        folder_id=destination_folder_id,
+        folder_section_id=None,
     )
-    ensure_row(rows, "Folder")
+    items = await select(
+        auth, TABLES["bookmarks"], folder_id=folder_id, for_update=True
+    )
+    for offset, item in enumerate(items):
+        await update(
+            auth,
+            TABLES["bookmarks"],
+            {
+                "folder_id": destination_folder_id,
+                "folder_section_id": None,
+                "position": position + offset,
+                "updated_at": now(),
+            },
+            id=item["id"],
+        )
+    await delete(auth, TABLES["folder_sections"], folder_id=folder_id)
+    ensure_row(await delete(auth, TABLES["folders"], id=folder_id), "Folder")
 
 
 async def reorder_folders(

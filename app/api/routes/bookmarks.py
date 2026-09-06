@@ -2,12 +2,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
 
-from app.integrations.supabase import AuthContext, get_resource_auth_context
+from app.integrations.postgres import AuthContext, get_resource_auth_context
 from app.schemas import BookmarkCreate, BookmarkOut, BookmarkUpdate, PositionUpdate
 from app.services import bookmarks
 
 router = APIRouter()
-AuthDependency = Annotated[AuthContext, Depends(get_resource_auth_context)]
+AuthDependency = Annotated[
+    AuthContext, Depends(get_resource_auth_context, scope="function")
+]
 
 
 @router.get("/bookmarks", response_model=list[BookmarkOut])

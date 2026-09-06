@@ -10,17 +10,6 @@ from app.core.config import (
 from app.core.url_validation import require_http_origin, require_http_url
 
 
-def test_schema_cannot_be_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SUPABASE_SCHEMA", "public")
-
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-    )
-
-    assert settings.supabase_schema == "bookmark"
-
-
 @pytest.mark.parametrize(
     ("host", "url", "expected"),
     [
@@ -47,47 +36,8 @@ def test_removed_env_fields_are_not_settings() -> None:
     assert "SUPABASE_TIMEOUT_SECONDS" not in Settings.model_fields
 
 
-def test_app_name_is_fixed() -> None:
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-    )
-
-    assert settings.app_name == "Bookmark API"
-
-
-def test_timeout_is_fixed() -> None:
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-    )
-
-    assert settings.SUPABASE_TIMEOUT_SECONDS == 5.0
-
-
-def test_local_allows_http_supabase_url() -> None:
-    settings = Settings(
-        SUPABASE_URL="http://localhost:54321",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-    )
-
-    assert str(settings.SUPABASE_URL) == "http://localhost:54321/"
-
-
-@pytest.mark.parametrize("supabase_url", ["not-a-url", "ftp://test.supabase.co"])
-def test_supabase_url_must_be_http_url(supabase_url: str) -> None:
-    with pytest.raises(ValidationError):
-        Settings(
-            SUPABASE_URL=supabase_url,
-            SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-        )
-
-
 def test_cors_origins_are_fixed() -> None:
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-    )
+    settings = Settings()
 
     assert settings.CORS_ORIGINS == ["http://localhost:3000"]
     assert "*" not in settings.CORS_ORIGINS
@@ -159,94 +109,40 @@ def test_bookmark_url_allows_http_path_and_query() -> None:
     )
 
 
+def test_database_configuration_and_secret_redaction():
+    settings = Settings(
+        DATABASE_URL="postgresql://user:private@localhost/bookmark",
+        BOOKMARK_API_KEY="secret",
+        BOOKMARK_USER_ID="00000000-0000-0000-0000-000000000001",
+    )
+    assert settings.database_schema == "bookmark"
+    assert "private" not in repr(settings)
+    assert "secret" not in repr(settings)
+    assert str(settings.BOOKMARK_USER_ID).endswith("0001")
+
+
 @pytest.mark.parametrize(
-    "supabase_url",
+    "value",
     [
-        "https://user:password@test.supabase.co",
-        "https://test.supabase.co/rest/v1",
-        "https://test.supabase.co?preview=true",
-        "https://test.supabase.co#section",
-        "https://test.supabase.co\\evil.com",
-        "https://test.supabase.co:",
-        "https://.",
-        "https://test.supabase.co\n",
-        "https://test.supabase.co\x00",
+        "",
+        "https://localhost/db",
+        "postgresql://localhost",
+        "postgresql://localhost:bad/db",
+        "postgresql://localhost/db\n",
+        123,
     ],
 )
-def test_supabase_url_rejects_non_origin_values(supabase_url: str) -> None:
+def test_database_url_validation(value):
     with pytest.raises(ValidationError):
-        Settings(
-            SUPABASE_URL=supabase_url,
-            SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-        )
+        Settings(DATABASE_URL=value)
 
 
-def test_https_supabase_origin_is_allowed() -> None:
-    settings = Settings(
-        SUPABASE_URL="https://api.example.com:8443",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-        SUPABASE_SECRET_KEY="sb_secret_test",
-        BOOKMARK_API_KEY="bookmark-api-secret",
-    )
-
-    assert str(settings.SUPABASE_URL) == "https://api.example.com:8443/"
-
-
-def test_publishable_key_must_not_be_blank() -> None:
-    with pytest.raises(ValidationError):
-        Settings(
-            SUPABASE_URL="https://test.supabase.co",
-            SUPABASE_PUBLISHABLE_KEY="   ",
-        )
-
-
-def test_blank_optional_secret_becomes_none() -> None:
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-        SUPABASE_SECRET_KEY="   ",
-        BOOKMARK_API_KEY="   ",
-    )
-
-    assert settings.SUPABASE_SECRET_KEY is None
+def test_optional_credentials_and_cache(monkeypatch):
+    settings = Settings(BOOKMARK_API_KEY=" ", BOOKMARK_USER_ID="")
     assert settings.BOOKMARK_API_KEY is None
-
-
-def test_publishable_key_cannot_be_used_as_server_secret() -> None:
-    with pytest.raises(ValidationError):
-        Settings(
-            SUPABASE_URL="https://test.supabase.co",
-            SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-            SUPABASE_SECRET_KEY="sb_publishable_test",
-        )
-
-
-def test_secret_key_must_not_equal_publishable_key() -> None:
-    with pytest.raises(ValidationError):
-        Settings(
-            SUPABASE_URL="https://test.supabase.co",
-            SUPABASE_PUBLISHABLE_KEY="shared-key",
-            SUPABASE_SECRET_KEY="shared-key",
-        )
-
-
-def test_optional_credentials_are_optional_at_settings_time() -> None:
-    settings = Settings(
-        SUPABASE_URL="https://test.supabase.co",
-        SUPABASE_PUBLISHABLE_KEY="sb_publishable_test",
-    )
-
-    assert settings.SUPABASE_SECRET_KEY is None
-    assert settings.BOOKMARK_API_KEY is None
-
-
-def test_settings_cache_can_be_cleared(monkeypatch: pytest.MonkeyPatch) -> None:
-    clear_settings_cache()
-    monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
-    monkeypatch.setenv("SUPABASE_PUBLISHABLE_KEY", "sb_publishable_test")
+    assert settings.BOOKMARK_USER_ID is None
     first = get_settings()
-    monkeypatch.setenv("SUPABASE_URL", "https://other.supabase.co")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://localhost/other")
     assert get_settings() is first
-
     clear_settings_cache()
-    assert str(get_settings().SUPABASE_URL) == "https://other.supabase.co/"
+    assert get_settings().DATABASE_URL.get_secret_value().endswith("/other")

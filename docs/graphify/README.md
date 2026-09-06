@@ -17,7 +17,9 @@
 | `graphify-out/GRAPH_TREE.html` | 파일 트리 뷰 |
 | `graphify-out/api-bookmark-callflow.html` | 호출 흐름 |
 
-현재 스냅샷: **396 nodes · 1129 edges · 20 communities**. 순환 import 없음. 멀티그래프 붕괴 없음.
+기존 스냅샷: **396 nodes · 1129 edges · 20 communities**. PostgreSQL 전환 이전 산출물입니다.
+2026-09-07 `graphify query/path/explain/update`를 시도했으나 CLI가 없어 AST 갱신은 미완료입니다.
+현재 런타임 경로는 아래 레이어 설명을 따릅니다.
 
 ## 워크스페이스
 
@@ -37,7 +39,7 @@ flowchart LR
   Mobile["bookmark mobile Expo"] -->|"REST + X-Bookmark-Key"| REST
   REST --> Domain["services bookmarks/folders/sections"]
   Domain --> DB["services/_db.py execute"]
-  DB --> SB[Supabase]
+  DB --> PG[PostgreSQL psycopg 3]
 ```
 
 웹 브라우저는 API 비밀을 보지 않는다. 모바일은 사용자가 입력한 키로 REST를 직접 호출한다.
@@ -65,8 +67,8 @@ flowchart TB
     DB["services/_db.py"]
   end
   subgraph data [데이터]
-    SB[Supabase PostgREST]
-    RPC["delete_folder / move_section"]
+    PG[PostgreSQL psycopg 3]
+    TX["요청별 트랜잭션 / rollback"]
   end
   Factory --> REST
   Factory --> Health
@@ -80,9 +82,9 @@ flowchart TB
   BM --> DB
   FD --> DB
   SC --> DB
-  DB --> SB
-  FD --> RPC
-  SC --> RPC
+  DB --> PG
+  FD --> TX
+  SC --> TX
 ```
 
 ## 커뮤니티 해석
@@ -91,15 +93,15 @@ flowchart TB
 | --- | --- | --- |
 | C2 | 도메인 서비스 + REST + 스키마 | `app/services/*`, `app/api/routes/{bookmarks,folders,sections,resources}.py`, `app/schemas.py` |
 | C3 | (제거됨) 옛 GraphQL 스냅샷 | 현재 코드에 `app/graphql/` 없음 |
-| C5 | 인증·설정 접근 | `get_resource_auth_context()`, `get_auth_context()`, `get_admin_client()` in `app/integrations/supabase.py` |
+| C5 | 인증·설정 접근 | `get_resource_auth_context()`, `connect()`, `_get_service_user()` in `app/integrations/postgres.py` |
 | C1 | 설정·헬스 | `Settings` / `app/core/config.py`, `app/api/routes/health.py` |
 | C6 | 앱 조립·로깅·오류 봉투 | `app/main.py`, `app/core/logging.py`, `register_exception_handlers()`, `RequestContextMiddleware` |
-| C0 | 리소스 테스트 더블 + `create_app` 일부 | `FakeSupabase`, `_client()` in `tests/test_resources.py` |
+| C0 | 리소스 테스트 더블 + `create_app` 일부 | `Connection`, `request()` in `tests/test_resources.py` |
 | C4 | HTTP 오류 응답 | `_error_response()`, `JSONResponse` |
-| C7 | 통합 테스트 | `tests/integration/test_supabase.py` |
+| C7 | 통합 테스트 | `tests/integration/test_postgres.py` |
 | C9 | 배포 메타 | `vercel.json` (`maxDuration`, `fluid`) |
 
-고드 노드: `Settings`(56), `AuthContext`(40), `FakeSupabase`(35), `_client()`(33), `ApiError`(29), `create_app()`, `execute()`.
+고드 노드: `Settings`(56), `AuthContext`(40), `Connection`(35), `_client()`(33), `ApiError`(29), `create_app()`, `execute()`.
 
 설정·인증·테스트 더블이 허브인 것은 정상이다. 도메인 CRUD를 그 파일들에 더 넣지 않는다. 다음 병목은 `execute()` — 북마크/폴더/섹션 REST 서비스가 여기를 경유한다.
 
@@ -117,7 +119,7 @@ FastAPI `Depends`는 파이썬 함수 호출이 아니라서 directed path가 �
 ## 자주 쓰는 질의
 
 ```bash
-graphify query "how do REST bookmark routes reach Supabase"
+graphify query "how do REST bookmark routes reach PostgreSQL"
 graphify explain "app_services_db_execute"
 graphify god-nodes
 graphify path "create_app" "list_bookmarks" --undirected

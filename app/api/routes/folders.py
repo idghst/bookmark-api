@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
 
-from app.integrations.supabase import AuthContext, get_resource_auth_context
+from app.integrations.postgres import AuthContext, get_resource_auth_context
 from app.schemas import (
     FolderCreate,
     FolderOut,
@@ -12,7 +12,9 @@ from app.schemas import (
 from app.services import folders
 
 router = APIRouter()
-AuthDependency = Annotated[AuthContext, Depends(get_resource_auth_context)]
+AuthDependency = Annotated[
+    AuthContext, Depends(get_resource_auth_context, scope="function")
+]
 
 
 @router.get("/folders", response_model=list[FolderOut])

@@ -1,18 +1,23 @@
 from typing import Any
 from uuid import uuid4
 
-from app.integrations.supabase import AuthContext
+from app.integrations.postgres import AuthContext
 from app.schemas import PositionUpdate, SectionCreate, SectionOut, SectionUpdate
-from app.services._db import TABLES, ensure_row, execute, next_position, now, reorder
+from app.services._db import (
+    TABLES,
+    delete,
+    ensure_row,
+    insert,
+    next_position,
+    now,
+    reorder,
+    select,
+    update,
+)
 
 
 async def list_sections(auth: AuthContext) -> list[SectionOut]:
-    rows = await execute(
-        auth.client.table(TABLES["sections"])
-        .select("*")
-        .eq("user_id", auth.user.id)
-        .order("position")
-    )
+    rows = await select(auth, TABLES["sections"])
     return [SectionOut(**row) for row in rows]
 
 
@@ -30,7 +35,7 @@ async def create_section(
         "updated_at": timestamp,
         "user_id": auth.user.id,
     }
-    rows = await execute(auth.client.table(TABLES["sections"]).insert(row).select("*"))
+    rows = await insert(auth, TABLES["sections"], row)
     return SectionOut(**ensure_row(rows, "Section"))
 
 
@@ -41,24 +46,12 @@ async def update_section(
 ) -> SectionOut:
     updates = payload.model_dump(by_alias=False, exclude_unset=True)
     updates["updated_at"] = now()
-    rows = await execute(
-        auth.client.table(TABLES["sections"])
-        .update(updates)
-        .eq("id", section_id)
-        .eq("user_id", auth.user.id)
-        .select("*")
-    )
+    rows = await update(auth, TABLES["sections"], updates, id=section_id)
     return SectionOut(**ensure_row(rows, "Section"))
 
 
 async def delete_section(section_id: str, auth: AuthContext) -> None:
-    rows = await execute(
-        auth.client.table(TABLES["sections"])
-        .delete()
-        .eq("id", section_id)
-        .eq("user_id", auth.user.id)
-        .select("id")
-    )
+    rows = await delete(auth, TABLES["sections"], id=section_id)
     ensure_row(rows, "Section")
 
 

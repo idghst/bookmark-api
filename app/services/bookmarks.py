@@ -1,13 +1,24 @@
 from typing import Any
 from uuid import uuid4
 
-from app.integrations.supabase import AuthContext
+from app.integrations.postgres import AuthContext
 from app.schemas import BookmarkCreate, BookmarkOut, BookmarkUpdate, PositionUpdate
-from app.services._db import TABLES, ensure_row, execute, next_position, now, reorder
+from app.services._db import (
+    TABLES,
+    delete,
+    ensure_row,
+    insert,
+    next_position,
+    now,
+    reorder,
+    select,
+    update,
+)
 from app.services.folder_sections import ensure_folder_section
 from app.services.folders import (
     create_folder,
     delete_folder,
+    ensure_folder,
     list_folders,
     reorder_folders,
     update_folder,
@@ -40,12 +51,7 @@ __all__ = [
 
 
 async def list_bookmarks(auth: AuthContext) -> list[BookmarkOut]:
-    rows = await execute(
-        auth.client.table(TABLES["bookmarks"])
-        .select("*")
-        .eq("user_id", auth.user.id)
-        .order("position")
-    )
+    rows = await select(auth, TABLES["bookmarks"])
     return [BookmarkOut(**row) for row in rows]
 
 
@@ -53,6 +59,8 @@ async def create_bookmark(
     payload: BookmarkCreate,
     auth: AuthContext,
 ) -> BookmarkOut:
+    if payload.folder_id is not None:
+        await ensure_folder(payload.folder_id, auth)
     if payload.folder_section_id is not None:
         await ensure_folder_section(payload.folder_section_id, payload.folder_id, auth)
     timestamp = now()
@@ -75,7 +83,7 @@ async def create_bookmark(
         "updated_at": timestamp,
         "user_id": auth.user.id,
     }
-    rows = await execute(auth.client.table(TABLES["bookmarks"]).insert(row).select("*"))
+    rows = await insert(auth, TABLES["bookmarks"], row)
     return BookmarkOut(**ensure_row(rows, "Bookmark"))
 
 
@@ -89,12 +97,7 @@ async def update_bookmark(
     moving_section = "folder_section_id" in updates
     if moving_folder or moving_section:
         current = ensure_row(
-            await execute(
-                auth.client.table(TABLES["bookmarks"])
-                .select("id,folder_id,folder_section_id")
-                .eq("id", bookmark_id)
-                .eq("user_id", auth.user.id)
-            ),
+            await select(auth, TABLES["bookmarks"], id=bookmark_id),
             "Bookmark",
         )
         folder_id = updates["folder_id"] if moving_folder else current.get("folder_id")
@@ -106,6 +109,8 @@ async def update_bookmark(
         if moving_folder and not moving_section:
             folder_section_id = None
             updates["folder_section_id"] = None
+        if isinstance(folder_id, str):
+            await ensure_folder(folder_id, auth)
         if isinstance(folder_section_id, str):
             await ensure_folder_section(folder_section_id, folder_id, auth)
         if folder_id != current.get("folder_id") or folder_section_id != current.get(
@@ -118,24 +123,12 @@ async def update_bookmark(
                 folder_section_id=folder_section_id,
             )
     updates["updated_at"] = now()
-    rows = await execute(
-        auth.client.table(TABLES["bookmarks"])
-        .update(updates)
-        .eq("id", bookmark_id)
-        .eq("user_id", auth.user.id)
-        .select("*")
-    )
+    rows = await update(auth, TABLES["bookmarks"], updates, id=bookmark_id)
     return BookmarkOut(**ensure_row(rows, "Bookmark"))
 
 
 async def delete_bookmark(bookmark_id: str, auth: AuthContext) -> None:
-    rows = await execute(
-        auth.client.table(TABLES["bookmarks"])
-        .delete()
-        .eq("id", bookmark_id)
-        .eq("user_id", auth.user.id)
-        .select("id")
-    )
+    rows = await delete(auth, TABLES["bookmarks"], id=bookmark_id)
     ensure_row(rows, "Bookmark")
 
 

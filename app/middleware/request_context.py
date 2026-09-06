@@ -9,7 +9,7 @@ from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.responses import Response
 
-from app.core.config import Settings, resolve_app_env
+from app.core.config import resolve_app_env
 from app.core.errors import _error_response
 
 REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,128}")
@@ -41,26 +41,11 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
         exception_type: str | None = None
 
         try:
-            if (
-                resolve_app_env(request.headers.get("host", ""), str(request.url))
-                == "production"
-            ):
-                if _is_docs_path(request.url.path):
-                    status = 404
-                    return _error_response(request, 404, "http_error", "HTTP error")
-                settings = getattr(request.app.state, "settings", None)
-                if (
-                    isinstance(settings, Settings)
-                    and request.url.path != "/health/live"
-                    and settings.SUPABASE_URL.scheme != "https"
-                ):
-                    status = 503
-                    return _error_response(
-                        request,
-                        503,
-                        "dependency_unavailable",
-                        "Supabase is unavailable",
-                    )
+            if resolve_app_env(
+                request.headers.get("host", ""), str(request.url)
+            ) == "production" and _is_docs_path(request.url.path):
+                status = 404
+                return _error_response(request, 404, "http_error", "HTTP error")
             response = await call_next(request)
             status = response.status_code
             response.headers["X-Request-ID"] = request_id

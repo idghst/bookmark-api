@@ -5,8 +5,7 @@ from pydantic_settings import SettingsConfigDict
 
 from app.core.config import Settings, clear_settings_cache
 
-os.environ.setdefault("SUPABASE_URL", "https://test.supabase.co")
-os.environ.setdefault("SUPABASE_PUBLISHABLE_KEY", "sb_publishable_test")
+os.environ.setdefault("DATABASE_URL", "postgresql://postgres@localhost/bookmark_test")
 
 Settings.model_config = SettingsConfigDict(env_file=None, extra="ignore")
 

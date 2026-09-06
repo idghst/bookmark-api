@@ -1,8 +1,9 @@
 from functools import lru_cache
 from typing import ClassVar, Literal
 from urllib.parse import urlsplit
+from uuid import UUID
 
-from pydantic import AnyHttpUrl, SecretStr, field_validator, model_validator
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.url_validation import require_http_origin
@@ -33,59 +34,40 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=(".env", ".env.local"), extra="ignore")
 
-    SUPABASE_URL: AnyHttpUrl
-    SUPABASE_PUBLISHABLE_KEY: SecretStr
-    SUPABASE_SECRET_KEY: SecretStr | None = None
+    DATABASE_URL: SecretStr
     BOOKMARK_API_KEY: SecretStr | None = None
+    BOOKMARK_USER_ID: UUID | None = None
 
     app_name: ClassVar[str] = "Bookmark API"
-    supabase_schema: ClassVar[str] = "bookmark"
+    database_schema: ClassVar[str] = "bookmark"
     CORS_ORIGINS: ClassVar[list[str]] = [
         require_http_origin("http://localhost:3000", allow_root_path=False)
     ]
-    SUPABASE_TIMEOUT_SECONDS: ClassVar[float] = 5.0
+    DATABASE_TIMEOUT_SECONDS: ClassVar[int] = 5
 
-    @field_validator("SUPABASE_URL", mode="before")
+    @field_validator("DATABASE_URL", mode="before")
     @classmethod
-    def require_supabase_origin(cls, value: object) -> object:
-        return require_http_origin(value, allow_root_path=True)
-
-    @field_validator("SUPABASE_PUBLISHABLE_KEY", mode="before")
-    @classmethod
-    def require_nonblank_publishable_key(cls, value: object) -> object:
-        raw_value = value.get_secret_value() if isinstance(value, SecretStr) else value
-        if not isinstance(raw_value, str) or not raw_value.strip():
-            raise ValueError("SUPABASE_PUBLISHABLE_KEY must not be blank")
-        return value
-
-    @field_validator("SUPABASE_SECRET_KEY", mode="before")
-    @classmethod
-    def normalize_blank_secret_key(cls, value: object) -> object:
-        raw_value = value.get_secret_value() if isinstance(value, SecretStr) else value
-        if isinstance(raw_value, str) and not raw_value.strip():
-            return None
-        if isinstance(raw_value, str) and raw_value.startswith("sb_publishable_"):
-            raise ValueError("SUPABASE_SECRET_KEY must not be a publishable key")
-        return value
-
-    @field_validator("BOOKMARK_API_KEY", mode="before")
-    @classmethod
-    def normalize_blank_bookmark_api_key(cls, value: object) -> object:
-        raw_value = value.get_secret_value() if isinstance(value, SecretStr) else value
-        if isinstance(raw_value, str) and not raw_value.strip():
-            return None
-        return value
-
-    @model_validator(mode="after")
-    def reject_matching_publishable_and_secret_keys(self) -> "Settings":
-        secret_key = self.SUPABASE_SECRET_KEY
-        if secret_key is not None and secret_key.get_secret_value() == (
-            self.SUPABASE_PUBLISHABLE_KEY.get_secret_value()
-        ):
-            raise ValueError(
-                "SUPABASE_SECRET_KEY must not equal SUPABASE_PUBLISHABLE_KEY"
+    def require_postgres_dsn(cls, value: object) -> object:
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if not isinstance(raw, str):
+            raise ValueError("DATABASE_URL must be a PostgreSQL URI")  # noqa: TRY004 - Pydantic validation
+        try:
+            parsed = urlsplit(raw)
+            valid = parsed.scheme in {"postgres", "postgresql"} and bool(
+                parsed.hostname
             )
-        return self
+            valid = valid and parsed.path not in {"", "/"} and parsed.port != 0
+        except ValueError:
+            valid = False
+        if not valid or any(char.isspace() or ord(char) < 32 for char in raw):
+            raise ValueError("DATABASE_URL must be a PostgreSQL URI")
+        return value
+
+    @field_validator("BOOKMARK_API_KEY", "BOOKMARK_USER_ID", mode="before")
+    @classmethod
+    def normalize_blank_optional(cls, value: object) -> object:
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        return None if isinstance(raw, str) and not raw.strip() else value
 
 
 @lru_cache
