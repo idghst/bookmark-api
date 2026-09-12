@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, status
 
-from app.integrations.postgres import AuthContext, get_resource_auth_context
+from app.integrations.supabase import AuthContext, get_resource_auth_context
 from app.schemas import (
     FolderSectionCreate,
     FolderSectionOut,

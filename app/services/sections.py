@@ -1,7 +1,7 @@
 from typing import Any
 from uuid import uuid4
 
-from app.integrations.postgres import AuthContext
+from app.integrations.supabase import AuthContext
 from app.schemas import PositionUpdate, SectionCreate, SectionOut, SectionUpdate
 from app.services._db import (
     TABLES,

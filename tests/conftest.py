@@ -5,9 +5,12 @@ from pydantic_settings import SettingsConfigDict
 
 from app.core.config import Settings, clear_settings_cache
 
-os.environ.setdefault("DATABASE_URL", "postgresql://postgres@localhost/bookmark_test")
+os.environ["SUPABASE_URL"] = "https://db.example.com"
+os.environ["SUPABASE_SECRET_KEY"] = "test-secret"
 
-Settings.model_config = SettingsConfigDict(env_file=None, extra="ignore")
+Settings.model_config = SettingsConfigDict(
+    **{**Settings.model_config, "env_file": None}
+)
 
 
 @pytest.fixture(autouse=True)

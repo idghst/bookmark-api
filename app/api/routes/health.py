@@ -1,11 +1,10 @@
 from typing import Annotated
 
-import psycopg
 from fastapi import APIRouter, Depends
 
 from app.core.config import Settings, get_settings
 from app.core.errors import ApiError
-from app.integrations.postgres import connect
+from app.integrations.supabase import create_client, request
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -24,9 +23,9 @@ async def probe_database(
     settings: Annotated[Settings, Depends(get_settings)],
 ) -> None:
     try:
-        async with await connect(settings) as connection:
-            await connection.execute("SELECT 1")
-    except psycopg.Error as error:
+        async with create_client(settings) as client:
+            await request(client, "GET", "items", params={"select": "id", "limit": "1"})
+    except ApiError as error:
         raise ApiError(
             503, "dependency_unavailable", "Database is unavailable"
         ) from error

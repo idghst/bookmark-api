@@ -1,10 +1,10 @@
-import psycopg
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.main import create_app
-from tests.db_fakes import Connection
+from tests.test_supabase import client
 
 
 @pytest.mark.parametrize("path", ["/health", "/health/live"])
@@ -12,21 +12,24 @@ def test_liveness(path):
     assert TestClient(create_app()).get(path).json() == {"status": "ok"}
 
 
-@pytest.mark.parametrize(
-    "error", [None, psycopg.OperationalError("private credentials")]
-)
-def test_readiness_queries_database(monkeypatch, error):
+@pytest.mark.parametrize("error", [False, True])
+def test_readiness_queries_supabase(monkeypatch, error):
     from app.api.routes import health
+    from app.integrations import supabase
 
-    conn = Connection(error if error else [])
+    def handle(request):
+        assert request.url.path == "/rest/v1/items"
+        assert request.url.params["limit"] == "1"
+        return (
+            httpx.Response(503, text="private credentials")
+            if error
+            else httpx.Response(200, json=[])
+        )
 
-    async def connect(_):
-        return conn
-
-    monkeypatch.setattr(health, "connect", connect)
-    response = TestClient(create_app()).get("/health/ready")
+    instance = client(monkeypatch, handle)
+    monkeypatch.setattr(health, "create_client", supabase.create_client)
+    response = instance.get("/health/ready")
     assert response.status_code == (503 if error else 200)
-    assert conn.queries[0][0] == "SELECT 1"
     assert "private" not in response.text
 
 

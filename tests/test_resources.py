@@ -1,18 +1,18 @@
-from datetime import UTC, datetime
-from uuid import UUID
+import json
+from copy import deepcopy
 
-import psycopg
+import httpx
 import pytest
 
-from tests.db_fakes import Connection
-from tests.test_auth import HEADERS, OWNER, client
+from tests.test_auth import HEADERS
+from tests.test_supabase import OWNER, client
 
 ID = "00000000-0000-0000-0000-000000000010"
 FOLDER_ID = "00000000-0000-0000-0000-000000000020"
 SECTION_ID = "00000000-0000-0000-0000-000000000030"
 BOOKMARK = {
-    "id": UUID(ID),
-    "user_id": UUID(OWNER),
+    "id": ID,
+    "user_id": OWNER,
     "title": "Example",
     "url": "https://example.com",
     "description": None,
@@ -21,8 +21,8 @@ BOOKMARK = {
     "folder_id": None,
     "folder_section_id": None,
     "position": 0,
-    "created_at": datetime(2026, 1, 1, tzinfo=UTC),
-    "updated_at": datetime(2026, 1, 1, tzinfo=UTC),
+    "created_at": "2026-01-01T00:00:00+00:00",
+    "updated_at": "2026-01-01T00:00:00+00:00",
 }
 FOLDER = {
     "id": ID,
@@ -52,178 +52,185 @@ CASES = [
 ]
 
 
-def request(monkeypatch, conn, method, path, **kwargs):
-    return getattr(client(monkeypatch, conn, BOOKMARK_USER_ID=OWNER), method)(
-        path, headers=HEADERS, **kwargs
-    )
+class Store:
+    def __init__(self):
+        self.tables = {table: [deepcopy(row)] for _, table, row, _ in CASES}
+        self.tables["folders"] += [{**FOLDER, "id": FOLDER_ID}]
+        self.tables["sections"] += [{**SECTION, "id": SECTION_ID}]
+        self.tables["folder_sections"] += [{**FOLDER_SECTION, "id": SECTION_ID}]
+        self.requests = []
+
+    def __call__(self, request):
+        self.requests.append(request)
+        table = request.url.path.rsplit("/", 1)[-1]
+        body = json.loads(request.content) if request.content else None
+        if "/rpc/" in request.url.path:
+            assert body["p_user_id"] == OWNER
+            return httpx.Response(200, json=[])
+        if request.method == "POST":
+            assert body["user_id"] == OWNER
+            self.tables[table].append(body)
+            return httpx.Response(201, json=[body])
+        assert request.url.params["user_id"] == "eq." + OWNER
+        rows = self.tables[table]
+        for key, value in request.url.params.items():
+            if value.startswith("eq."):
+                rows = [r for r in rows if str(r.get(key)) == value[3:]]
+            elif value == "is.null":
+                rows = [r for r in rows if r.get(key) is None]
+        if request.method == "GET":
+            rows = sorted(
+                rows,
+                key=lambda r: (r["position"], r["id"]),
+                reverse=".desc" in request.url.params.get("order", ""),
+            )
+            offset = int(request.url.params.get("offset", "0"))
+            limit = int(request.url.params.get("limit", "1000"))
+            return httpx.Response(200, json=rows[offset : offset + limit])
+        if request.method == "PATCH":
+            for row in rows:
+                row.update(body)
+        elif request.method == "DELETE":
+            self.tables[table] = [row for row in self.tables[table] if row not in rows]
+        return httpx.Response(200, json=rows)
+
+
+def api(monkeypatch, store):
+    return client(monkeypatch, store, BOOKMARK_USER_ID=OWNER)
 
 
 @pytest.mark.parametrize("path,table,row,payload", CASES)
 def test_crud_and_reorder_contract(monkeypatch, path, table, row, payload):
-    conn = Connection([row])
-    response = request(monkeypatch, conn, "get", "/api/" + path)
+    store = Store()
+    instance = api(monkeypatch, store)
+    response = instance.get("/api/" + path, headers=HEADERS)
     assert response.status_code == 200
     assert response.json()[0]["userId"] == OWNER
-    assert response.json()[0]["id"] == ID
-    assert '"bookmark"."' + table + '"' in conn.queries[0][0]
-    assert conn.queries[0][1] == [OWNER]
-
-    results = ([[FOLDER]] if path == "folder-sections" else []) + [
-        [{"position": 0}],
-        [row],
-    ]
-    conn = Connection(*results)
-    response = request(monkeypatch, conn, "post", "/api/" + path, json=payload)
+    response = instance.post("/api/" + path, json=payload, headers=HEADERS)
     assert response.status_code == 201, response.text
-    assert OWNER in conn.queries[-1][1]
-    assert "RETURNING *" in conn.queries[-1][0]
-    assert conn.committed
-
-    conn = Connection([row])
+    assert response.json()["position"] == 1
     field = "title" if path == "bookmarks" else "name"
-    response = request(
-        monkeypatch,
-        conn,
-        "patch",
-        f"/api/{path}/{ID}",
-        json={field: "Changed", "color": "#fff"},
+    response = instance.patch(
+        f"/api/{path}/{ID}", json={field: "Changed", "color": "#fff"}, headers=HEADERS
     )
     assert response.status_code == 200
-    assert conn.queries[-1][1][-2:] == [ID, OWNER]
-
-    conn = Connection([row], [row])
-    response = request(
-        monkeypatch,
-        conn,
-        "post",
-        f"/api/{path}/reorder",
-        json=[{"id": ID, "position": 2}, {"id": ID, "position": 3}],
-    )
+    assert response.json()[field] == "Changed"
+    updates = [{"id": ID, "position": 2}, {"id": ID, "position": 3}]
+    response = instance.post(f"/api/{path}/reorder", json=updates, headers=HEADERS)
     assert response.status_code == 204
-    assert all(query[1][-2:] == [ID, OWNER] for query in conn.queries)
-
-    results = (
-        [[row], [{"position": 0}], [], [], [row]] if path == "folders" else [[row]]
-    )
-    conn = Connection(*results)
-    response = request(monkeypatch, conn, "delete", f"/api/{path}/{ID}")
+    assert store.requests[-1].url.path.endswith("rpc/reorder_resources")
+    assert json.loads(store.requests[-1].content) == {
+        "p_table": table,
+        "p_user_id": OWNER,
+        "p_updates": updates,
+    }
+    response = instance.delete(f"/api/{path}/{ID}", headers=HEADERS)
     assert response.status_code == 204
-    assert conn.queries[-1][1] == [ID, OWNER]
 
 
 @pytest.mark.parametrize("path,table,row,payload", CASES)
-def test_missing_resources_and_atomic_reorder(monkeypatch, path, table, row, payload):
-    conn = Connection([])
-    response = request(
-        monkeypatch, conn, "patch", f"/api/{path}/{ID}", json={"color": "#fff"}
+def test_missing_resources_and_failed_reorder_uses_one_rpc(
+    monkeypatch, path, table, row, payload
+):
+    response = api(monkeypatch, lambda request: httpx.Response(200, json=[])).patch(
+        f"/api/{path}/{ID}", json={"color": "#fff"}, headers=HEADERS
     )
     assert response.status_code == 404
-    assert response.json()["code"] == "resource_not_found"
-    assert conn.rolled_back
-    conn = Connection([row], [])
-    response = request(
-        monkeypatch,
-        conn,
-        "post",
+    calls = []
+
+    def failure(request):
+        calls.append(request)
+        return httpx.Response(404, json={"code": "P0002", "message": "private"})
+
+    response = api(monkeypatch, failure).post(
         f"/api/{path}/reorder",
-        json=[{"id": ID, "position": 4}, {"id": ID, "position": 9}],
+        json=[{"id": ID, "position": 4}, {"id": FOLDER_ID, "position": 9}],
+        headers=HEADERS,
     )
     assert response.status_code == 404
-    assert conn.rolled_back and not conn.committed
+    assert len(calls) == 1
+    assert calls[0].url.path.endswith("/rpc/reorder_resources")
 
 
 @pytest.mark.parametrize(
-    "error,status,code",
+    "sqlcode,status,code",
     [
-        (
-            psycopg.errors.InsufficientPrivilege("private"),
-            403,
-            "database_access_denied",
-        ),
-        (psycopg.errors.NoDataFound("private"), 404, "resource_not_found"),
-        (psycopg.errors.ForeignKeyViolation("private"), 409, "resource_conflict"),
-        (psycopg.errors.CheckViolation("private"), 409, "resource_conflict"),
-        (psycopg.errors.UniqueViolation("private"), 409, "resource_conflict"),
-        (psycopg.errors.NotNullViolation("private"), 409, "resource_conflict"),
-        (psycopg.errors.InvalidTextRepresentation("private"), 422, "validation_error"),
-        (psycopg.OperationalError("private"), 503, "database_unavailable"),
-        (psycopg.ProgrammingError("private"), 502, "database_request_failed"),
+        ("42501", 403, "database_access_denied"),
+        ("P0002", 404, "resource_not_found"),
+        ("23503", 409, "resource_conflict"),
+        ("23514", 409, "resource_conflict"),
+        ("23505", 409, "resource_conflict"),
+        ("23502", 409, "resource_conflict"),
+        ("22P02", 422, "validation_error"),
+        ("22004", 422, "validation_error"),
+        ("unexpected", 502, "database_request_failed"),
     ],
 )
-def test_database_errors_are_sanitized(monkeypatch, error, status, code):
-    response = request(monkeypatch, Connection(error), "get", "/api/bookmarks")
+def test_database_errors_are_sanitized(monkeypatch, sqlcode, status, code):
+    response = api(
+        monkeypatch,
+        lambda request: httpx.Response(
+            400, json={"code": sqlcode, "message": "private"}
+        ),
+    ).get("/api/bookmarks", headers=HEADERS)
     assert response.status_code == status
     assert response.json()["code"] == code
     assert set(response.json()) == {"code", "message", "request_id"}
     assert "private" not in response.text
 
 
-@pytest.mark.parametrize("rows", [None, [1]])
-def test_invalid_database_response(monkeypatch, rows):
-    response = request(monkeypatch, Connection(rows), "get", "/api/bookmarks")
+@pytest.mark.parametrize("body", [None, [1], {}])
+def test_invalid_database_response(monkeypatch, body):
+    response = api(monkeypatch, lambda request: httpx.Response(200, json=body)).get(
+        "/api/bookmarks", headers=HEADERS
+    )
     assert response.json()["code"] == "database_response_invalid"
 
 
-def test_serialization_and_injection_safe_parameters(monkeypatch):
-    conn = Connection([BOOKMARK])
-    response = request(monkeypatch, conn, "get", "/api/bookmarks")
+def test_serialization_and_owner_filter_cannot_be_overridden(monkeypatch):
+    store = Store()
+    response = api(monkeypatch, store).get(
+        "/api/bookmarks?user_id=eq.other", headers=HEADERS
+    )
     assert response.json()[0]["createdAt"] == "2026-01-01T00:00:00+00:00"
     assert response.json()[0]["isFavorite"] is False
-    attack = "x' OR true; --"
-    conn = Connection([])
-    response = request(monkeypatch, conn, "delete", "/api/bookmarks/" + attack)
-    assert response.status_code == 404
-    assert attack not in conn.queries[0][0]
-    assert attack in conn.queries[0][1]
+    assert store.requests[0].url.params["user_id"] == "eq." + OWNER
 
 
 @pytest.mark.parametrize("section_id", [SECTION_ID, None])
 def test_folder_move_recalculates_position(monkeypatch, section_id):
-    conn = Connection(
-        [FOLDER],
-        *([[SECTION]] if section_id else []),
-        *([[{"position": 7}]] if section_id else []),
-        [{**FOLDER, "section_id": section_id}],
+    store = Store()
+    store.tables["folders"][0]["section_id"] = FOLDER_ID
+    response = api(monkeypatch, store).patch(
+        f"/api/folders/{ID}", json={"sectionId": section_id}, headers=HEADERS
     )
-    response = request(
-        monkeypatch, conn, "patch", f"/api/folders/{ID}", json={"sectionId": section_id}
-    )
-    assert response.status_code == 200
-    if section_id:
-        assert 7 in conn.queries[-1][1]
+    assert response.status_code == 200, response.text
+    assert response.json()["position"] == (0 if section_id else 1)
 
 
 def test_create_folder_in_section_and_unknown_parent(monkeypatch):
-    conn = Connection([SECTION], [{"position": 4}], [FOLDER])
+    instance = api(monkeypatch, Store())
     assert (
-        request(
-            monkeypatch,
-            conn,
-            "post",
+        instance.post(
             "/api/folders",
             json={"name": "New", "sectionId": SECTION_ID},
+            headers=HEADERS,
         ).status_code
         == 201
     )
-    conn = Connection([])
     assert (
-        request(
-            monkeypatch,
-            conn,
-            "post",
+        instance.post(
             "/api/folders",
-            json={"name": "New", "sectionId": SECTION_ID},
+            json={"name": "New", "sectionId": "missing"},
+            headers=HEADERS,
         ).status_code
         == 404
     )
-    conn = Connection([])
     assert (
-        request(
-            monkeypatch,
-            conn,
-            "post",
+        instance.post(
             "/api/folder-sections",
-            json={"name": "New", "folderId": FOLDER_ID},
+            json={"name": "New", "folderId": "missing"},
+            headers=HEADERS,
         ).status_code
         == 404
     )
@@ -236,16 +243,10 @@ def test_create_folder_in_section_and_unknown_parent(monkeypatch):
 def test_bookmark_parent_ownership_and_membership(
     monkeypatch, folder_section_id, matching
 ):
-    results = [[FOLDER]]
-    if folder_section_id:
-        results += [[{**FOLDER_SECTION, "folder_id": FOLDER_ID if matching else ID}]]
-    if matching:
-        results += [[{"position": 3}], [BOOKMARK]]
-    conn = Connection(*results)
-    response = request(
-        monkeypatch,
-        conn,
-        "post",
+    store = Store()
+    if not matching:
+        store.tables["folder_sections"][-1]["folder_id"] = ID
+    response = api(monkeypatch, store).post(
         "/api/bookmarks",
         json={
             "title": "New",
@@ -253,94 +254,83 @@ def test_bookmark_parent_ownership_and_membership(
             "folderId": FOLDER_ID,
             "folderSectionId": folder_section_id,
         },
+        headers=HEADERS,
     )
     assert response.status_code == (201 if matching else 409)
 
 
 def test_bookmark_rejects_foreign_folder(monkeypatch):
-    response = request(
-        monkeypatch,
-        Connection([]),
-        "post",
+    store = Store()
+    store.tables["folders"][-1]["user_id"] = "other"
+    response = api(monkeypatch, store).post(
         "/api/bookmarks",
         json={"title": "New", "url": "https://example.com", "folderId": FOLDER_ID},
+        headers=HEADERS,
     )
     assert response.status_code == 404
 
 
 @pytest.mark.parametrize(
-    "updates,current,extra",
+    "updates,current",
     [
-        ({"folderId": FOLDER_ID}, BOOKMARK, [[FOLDER], [{"position": 3}]]),
+        ({"folderId": FOLDER_ID}, BOOKMARK),
         (
             {"folderId": None},
             {**BOOKMARK, "folder_id": FOLDER_ID, "folder_section_id": SECTION_ID},
-            [[{"position": 3}]],
         ),
-        (
-            {"folderSectionId": SECTION_ID},
-            {**BOOKMARK, "folder_id": FOLDER_ID},
-            [[FOLDER], [FOLDER_SECTION], [{"position": 3}]],
-        ),
+        ({"folderSectionId": SECTION_ID}, {**BOOKMARK, "folder_id": FOLDER_ID}),
         (
             {"folderSectionId": None},
             {**BOOKMARK, "folder_id": FOLDER_ID, "folder_section_id": SECTION_ID},
-            [[FOLDER], [{"position": 3}]],
         ),
-        ({"folderSectionId": None}, BOOKMARK, []),
+        ({"folderSectionId": None}, BOOKMARK),
     ],
 )
-def test_bookmark_moves_and_clears_folder_section(monkeypatch, updates, current, extra):
-    conn = Connection([current], *extra, [BOOKMARK])
-    response = request(monkeypatch, conn, "patch", f"/api/bookmarks/{ID}", json=updates)
+def test_bookmark_moves_and_clears_folder_section(monkeypatch, updates, current):
+    store = Store()
+    store.tables["items"] = [deepcopy(current)]
+    response = api(monkeypatch, store).patch(
+        f"/api/bookmarks/{ID}", json=updates, headers=HEADERS
+    )
     assert response.status_code == 200, response.text
     if "folderId" in updates:
-        assert '"folder_section_id" = %s' in conn.queries[-1][0]
+        assert response.json()["folderSectionId"] is None
 
 
-def test_folder_delete_moves_bookmarks_and_deletes_sections(monkeypatch):
-    conn = Connection(
-        [FOLDER], [FOLDER], [{"position": 5}], [BOOKMARK], [BOOKMARK], [], [FOLDER]
-    )
-    response = request(
-        monkeypatch,
-        conn,
-        "delete",
-        f"/api/folders/{ID}?destination_folder_id={FOLDER_ID}",
+def test_folder_delete_delegates_atomic_movement(monkeypatch):
+    store = Store()
+    response = api(monkeypatch, store).delete(
+        f"/api/folders/{ID}?destination_folder_id={FOLDER_ID}", headers=HEADERS
     )
     assert response.status_code == 204
-    assert conn.queries[0][0].endswith("FOR UPDATE")
-    assert conn.queries[1][0].endswith("FOR UPDATE")
-    assert conn.queries[3][0].endswith("FOR UPDATE")
-    assert conn.committed
-    mutation = conn.queries[4]
-    assert mutation[1][0:3] == [FOLDER_ID, None, 5]
-    assert 'DELETE FROM "bookmark"."folder_sections"' in conn.queries[5][0]
-    assert all("user_id" in query for query, _ in conn.queries)
+    assert len(store.requests) == 1
+    assert json.loads(store.requests[0].content) == {
+        "p_folder_id": ID,
+        "p_destination_folder_id": FOLDER_ID,
+        "p_user_id": OWNER,
+    }
 
 
 def test_folder_delete_rejects_same_destination(monkeypatch):
-    conn = Connection()
-    response = request(
-        monkeypatch, conn, "delete", f"/api/folders/{ID}?destination_folder_id={ID}"
+    store = Store()
+    response = api(monkeypatch, store).delete(
+        f"/api/folders/{ID}?destination_folder_id={ID}", headers=HEADERS
     )
     assert response.status_code == 422
     assert response.json()["code"] == "folder_destination_invalid"
-    assert not conn.queries
+    assert not store.requests
 
 
 @pytest.mark.parametrize("url", ["javascript:alert(1)", None])
 def test_invalid_bookmark_url(monkeypatch, url):
-    response = request(
-        monkeypatch,
-        Connection(),
-        "post",
-        "/api/bookmarks",
-        json={"title": "New", "url": url},
+    response = api(monkeypatch, Store()).post(
+        "/api/bookmarks", json={"title": "New", "url": url}, headers=HEADERS
     )
     assert response.status_code == 422
 
 
 def test_folder_tree_stays_removed(monkeypatch):
-    response = request(monkeypatch, Connection(), "get", "/api/folders/tree")
-    assert response.status_code == 405
+    assert (
+        api(monkeypatch, Store()).get("/api/folders/tree", headers=HEADERS).status_code
+        == 405
+    )

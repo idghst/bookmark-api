@@ -1,7 +1,7 @@
 # fastapi-bookmark
 
-`bookmark` PostgreSQL 스키마의 `items`, `folders`, `sections`,
-`folder_sections`를 psycopg 3으로 직접 사용하는 FastAPI 서비스입니다.
+`supabase.idghst.co.kr`의 `bookmark` 스키마에 있는 `items`, `folders`,
+`sections`, `folder_sections`를 Supabase PostgREST로 사용하는 FastAPI 서비스입니다.
 
 ## 실행
 
@@ -9,14 +9,16 @@ Python 3.12와 uv가 필요합니다.
 
 ```bash
 uv sync --locked --dev
-cp .env.example .env.local
-# .env.local에 DATABASE_URL, BOOKMARK_API_KEY 설정
+# .env.local이 없는 경우에만 .env.example을 복사합니다.
+# .env.local에 SUPABASE_URL, SUPABASE_SECRET_KEY, BOOKMARK_API_KEY 설정
 uv run python -m uvicorn app.main:app --reload
 ```
 
-`DATABASE_URL`은 `postgresql://user:password@host:5432/database?sslmode=require`
-형식의 서버 비밀값입니다. 네트워크와 TLS 옵션은 실제 DB에 맞게 지정합니다.
-기존 Supabase URL, publishable/secret key, JWT는 사용하지 않습니다.
+로컬에서는 저장소 루트의 `.env`, `.env.local` 순서로 읽습니다.
+실제 환경 변수가 파일보다 우선하므로 운영에서는 같은 이름을 Vercel에 등록합니다.
+`SUPABASE_URL=https://supabase.idghst.co.kr`, `SUPABASE_SECRET_KEY`가 필수이며,
+리소스 접근에는 웹과 동일한 `BOOKMARK_API_KEY`를 설정합니다.
+비밀 키는 API 서버에만 보관합니다. `SUPABASE_TIMEOUT_SECONDS`는 기본 10초입니다.
 
 `BOOKMARK_USER_ID`를 UUID로 지정하면 해당 소유자로 동작합니다.
 미설정이면 네 테이블 전체의 서로 다른 `user_id`를 조회해 유일한 소유자를
@@ -30,22 +32,21 @@ uv run python -m uvicorn app.main:app --reload
 `auth/me` 응답은 `{ "id": "<소유자 UUID>", "email": null }`입니다.
 브라우저에는 키를 전달하지 않고 웹 BFF에서만 보관합니다.
 
-각 요청에 PostgreSQL 연결과 트랜잭션 하나를 사용하며 응답 전에 commit합니다.
-실패하면 전체 요청을 rollback하므로 reorder 도중 오류가 나도 일부만 저장되지
-않습니다. 모든 리소스 쿼리에 `user_id` 조건을 강제하고 부모 폴더·섹션의
-소유자를 확인합니다. SQL 값은 파라미터로 전달합니다.
+모든 리소스 요청에 `user_id` 조건을 강제하고 부모 폴더·섹션의 소유자를 확인합니다.
+목록은 페이지를 끝까지 조회해 서버의 페이지 제한으로 데이터가 잘리지 않게 합니다.
+폴더 삭제와 여러 항목의 정렬은 `delete_folder`, `reorder_resources` RPC에서
+각각 한 트랜잭션으로 처리합니다. 중간 실패 시 해당 RPC 전체가 취소됩니다.
 
-DB 연결 역할에는 `bookmark` 스키마 USAGE와 네 테이블 CRUD 권한이 필요합니다.
-기존 DB에 RLS가 활성화돼 있으면 서버 역할에 허용된 정책 또는 BYPASSRLS 권한이
-있어야 합니다. 이 서비스는 `auth.uid()`, JWT 세션, PostgREST, DB RPC에
-의존하지 않습니다. 기존 RLS/권한/스키마를 자동으로 바꾸지 않습니다.
-`supabase/migrations`는 과거 스키마 변경 기록으로 보존합니다.
-운영 테이블은 이미 존재해야 하며 테스트용 schema.sql을 운영에 적용하지 않습니다.
+`bookmark` 스키마와 네 테이블이 Supabase PostgREST에 노출되어 있어야 합니다.
+`supabase/migrations/20260913090000_atomic_rest_operations.sql`에 RPC 정의가 있습니다.
+현재 Supabase에는 이 마이그레이션을 적용했습니다. 다른 인스턴스를 준비할 때는
+해당 인스턴스의 마이그레이션 이력을 확인한 뒤 적용합니다.
+애플리케이션 시작 시 스키마나 권한을 자동 변경하지 않습니다.
 
 ## API
 
 - `GET /`, `GET /health`, `GET /health/live`
-- `GET /health/ready`: PostgreSQL `SELECT 1` 확인
+- `GET /health/ready`: Supabase의 `bookmark.items` 읽기 연결 확인
 - `GET /api/v1/auth/me`
 - `/api/bookmarks`, `/api/folders`, `/api/sections`, `/api/folder-sections`
   각각 GET/POST, `/{id}` PATCH/DELETE, `/reorder` POST
@@ -72,30 +73,22 @@ CORS는 `http://localhost:3000`, 로그는 INFO JSON으로 고정합니다.
 
 ```bash
 uv lock --check
-uv run ruff format --check app tests
-uv run ruff check --no-cache app tests
-uv run mypy app
-uv run pytest -m "not integration" --cov=app --cov-report=term-missing
-uv run pip-audit
+uv run python -m ruff format --check app tests
+uv run python -m ruff check --no-cache app tests
+uv run python -m mypy app
+uv run python -m pytest --cov=app --cov-report=term-missing
+uv run python -m pip_audit
 ```
 
-통합 테스트는 별도의 로컬 PostgreSQL 17 이상 `*_test` DB만 허용합니다.
-`tests/integration/schema.sql`로 테이블을 준비하고 테스트 소유자 데이터만 정리합니다.
-운영 DB에는 실행하지 않습니다.
-
-```bash
-DATABASE_TEST_URL=postgresql://postgres@127.0.0.1:55439/bookmark_test \
-uv run pytest -m integration -v
-```
-
-자격 증명이 없으면 통합 테스트는 skip됩니다. 실제 PostgreSQL에서 CRUD,
-소유자 격리, 폴더 삭제 이동, 부분 실패 rollback을 확인합니다.
+자동 테스트는 HTTP 응답을 모의해 CRUD, 소유자 격리, RPC 호출,
+페이지 처리와 오류를 검증하며 실제 Supabase 데이터를 변경하지 않습니다.
+로컬 실행 후 `/health/ready`와 인증된 리소스 조회로 실제 연결을 확인합니다.
 
 ## 배포
 
 Vercel project: `idghst/api-bookmark`. Preview/Production 서버 환경에
-`DATABASE_URL`, `BOOKMARK_API_KEY`, 필요 시 `BOOKMARK_USER_ID`를 설정합니다.
-서버에서 DB에 네트워크 연결할 수 있어야 합니다.
+`SUPABASE_URL`, `SUPABASE_SECRET_KEY`, `BOOKMARK_API_KEY`, 필요 시
+`BOOKMARK_USER_ID`를 설정합니다. 서버에서 Supabase HTTPS 주소로 접근할 수 있어야 합니다.
 
 CI 통과 후 Preview에서 `/health/live`, `/health/ready`, 잘못된 키의 401,
 실제 키의 CRUD를 확인하고 Production으로 승격합니다.
@@ -107,4 +100,4 @@ vercel inspect <preview-url>
 vercel promote <preview-url>
 ```
 
-문제는 `X-Request-ID`로 추적하고 DB URI와 키를 로그·커밋에 남기지 않습니다.
+문제는 `X-Request-ID`로 추적하고 비밀 키를 로그·커밋에 남기지 않습니다.
