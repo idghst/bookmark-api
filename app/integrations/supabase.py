@@ -1,12 +1,13 @@
 """Small PostgREST transport; service methods always supply the resolved owner."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from secrets import compare_digest
 from typing import Annotated, Any
 
 import httpx
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Request
 
 from app.core.config import Settings, get_settings
 from app.core.errors import ApiError
@@ -24,8 +25,22 @@ class AuthContext:
     client: httpx.AsyncClient
 
 
+async def get_database_client(
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
+) -> AsyncIterator[httpx.AsyncClient]:
+    client = getattr(request.app.state, "database_client", None)
+    if client is not None:
+        yield client
+    else:
+        # ASGI callers that disable lifespan still get a correctly closed client.
+        async with create_client(settings) as client:
+            yield client
+
+
 async def get_resource_auth_context(
     settings: Annotated[Settings, Depends(get_settings)],
+    client: Annotated[httpx.AsyncClient, Depends(get_database_client)],
     service_key: Annotated[str | None, Header(alias="X-Bookmark-Key")] = None,
 ) -> AsyncIterator[AuthContext]:
     if service_key is None:
@@ -35,8 +50,7 @@ async def get_resource_auth_context(
         service_key.encode(), configured_key.get_secret_value().encode()
     ):
         raise ApiError(401, "invalid_api_key", "Invalid API key")
-    async with create_client(settings) as client:
-        yield AuthContext(ServiceUser(await service_user_id(client, settings)), client)
+    yield AuthContext(ServiceUser(await service_user_id(client, settings)), client)
 
 
 def create_client(settings: Settings) -> httpx.AsyncClient:
@@ -118,39 +132,55 @@ async def select(
 async def service_user_id(client: httpx.AsyncClient, settings: Settings) -> str:
     if settings.BOOKMARK_USER_ID is not None:
         return str(settings.BOOKMARK_USER_ID)
-    owners: set[str] = set()
-    for table in ("items", "folders", "sections", "folder_sections"):
-        offset = 0
-        while True:
+
+    async def owner_bounds(table: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        # Min/max detect every distinct owner without downloading every row.
+        # Descending puts NULL first so invalid ownership also fails closed.
+        for direction in ("asc", "desc"):
             page = await request(
                 client,
                 "GET",
                 table,
                 params={
                     "select": "user_id",
-                    "order": "user_id,id",
-                    "limit": "1000",
-                    "offset": str(offset),
+                    "order": f"user_id.{direction}",
+                    "limit": "1",
                 },
             )
             if not page:
                 break
-            for row in page:
-                owner = row.get("user_id")
-                if not isinstance(owner, str) or not owner:
-                    raise ApiError(
-                        503,
-                        "service_identity_unavailable",
-                        "Service identity is unavailable",
-                    )
-                owners.add(owner)
+            rows.extend(page)
+        return rows
+
+    # At most four simultaneous reads. Await all tasks before propagating an
+    # error so no reads outlive the request or its fallback transport.
+    results = await asyncio.gather(
+        *(
+            owner_bounds(table)
+            for table in ("items", "folders", "sections", "folder_sections")
+        ),
+        return_exceptions=True,
+    )
+    owners: set[str] = set()
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+        for row in result:
+            owner = row.get("user_id")
+            if not isinstance(owner, str) or not owner:
+                raise ApiError(
+                    503,
+                    "service_identity_unavailable",
+                    "Service identity is unavailable",
+                )
+            owners.add(owner)
             if len(owners) > 1:
                 raise ApiError(
                     503,
                     "service_identity_unavailable",
                     "Service identity is unavailable",
                 )
-            offset += len(page)
     if len(owners) != 1:
         raise ApiError(
             503, "service_identity_unavailable", "Service identity is unavailable"

@@ -34,6 +34,14 @@ def http_filters(auth: AuthContext, filters: dict[str, object]) -> dict[str, str
 async def select(
     auth: AuthContext, table: str, **filters: object
 ) -> list[dict[str, Any]]:
+    if filters.get("id") is not None:
+        # id is unique; there cannot be a second page for an equality lookup.
+        return await supabase.request(
+            auth.client,
+            "GET",
+            table,
+            params={"select": "*", **http_filters(auth, filters), "limit": "1"},
+        )
     return await supabase.select(
         auth.client,
         table,

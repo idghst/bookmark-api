@@ -334,3 +334,21 @@ def test_folder_tree_stays_removed(monkeypatch):
         api(monkeypatch, Store()).get("/api/folders/tree", headers=HEADERS).status_code
         == 405
     )
+
+
+def test_bookmark_move_uses_one_request_per_id_lookup(monkeypatch):
+    store = Store()
+    response = api(monkeypatch, store).patch(
+        f"/api/bookmarks/{ID}",
+        json={"folderId": FOLDER_ID, "folderSectionId": SECTION_ID},
+        headers=HEADERS,
+    )
+    assert response.status_code == 200
+    lookups = [
+        request
+        for request in store.requests
+        if request.method == "GET" and "id" in request.url.params
+    ]
+    assert len(lookups) == 3
+    assert all(request.url.params["limit"] == "1" for request in lookups)
+    assert len(store.requests) == 5

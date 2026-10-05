@@ -21,8 +21,9 @@ uv run python -m uvicorn app.main:app --reload
 비밀 키는 API 서버에만 보관합니다. `SUPABASE_TIMEOUT_SECONDS`는 기본 10초입니다.
 
 `BOOKMARK_USER_ID`를 UUID로 지정하면 해당 소유자로 동작합니다.
-미설정이면 네 테이블 전체의 서로 다른 `user_id`를 조회해 유일한 소유자를
-선택합니다. 데이터가 없거나 소유자가 복수이면 503으로 거부합니다.
+미설정이면 네 테이블의 `user_id` 최소·최대값을 비교해 유일한 소유자를
+선택합니다. 테이블당 최대 두 행만 받으며, 최대 네 테이블을 병렬 조회합니다.
+데이터가 없거나 소유자가 복수이거나 NULL이면 503으로 거부합니다.
 빈 DB를 시작할 때는 `BOOKMARK_USER_ID`가 필요합니다.
 
 ## 인증과 데이터 접근
@@ -34,8 +35,13 @@ uv run python -m uvicorn app.main:app --reload
 
 모든 리소스 요청에 `user_id` 조건을 강제하고 부모 폴더·섹션의 소유자를 확인합니다.
 목록은 페이지를 끝까지 조회해 서버의 페이지 제한으로 데이터가 잘리지 않게 합니다.
+고유 `id`로 조회하는 부모 확인·이동 전 조회는 한 번의 DB 요청으로 끝냅니다.
 폴더 삭제와 여러 항목의 정렬은 `delete_folder`, `reorder_resources` RPC에서
 각각 한 트랜잭션으로 처리합니다. 중간 실패 시 해당 RPC 전체가 취소됩니다.
+
+API와 readiness 검사는 앱 lifespan 동안 하나의 HTTPX 연결 풀을 공유하고,
+앱 종료 시 닫습니다. ASGI lifespan을 끈 호출에서는 요청별 연결을 사용합니다.
+소유자와 리소스 응답은 캐시하지 않아 DB 변경을 다음 요청에 반영합니다.
 
 `bookmark` 스키마와 네 테이블이 Supabase PostgREST에 노출되어 있어야 합니다.
 `supabase/migrations/20260913090000_atomic_rest_operations.sql`에 RPC 정의가 있습니다.

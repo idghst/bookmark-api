@@ -14,9 +14,6 @@ def test_liveness(path):
 
 @pytest.mark.parametrize("error", [False, True])
 def test_readiness_queries_supabase(monkeypatch, error):
-    from app.api.routes import health
-    from app.integrations import supabase
-
     def handle(request):
         assert request.url.path == "/rest/v1/items"
         assert request.url.params["limit"] == "1"
@@ -27,7 +24,6 @@ def test_readiness_queries_supabase(monkeypatch, error):
         )
 
     instance = client(monkeypatch, handle)
-    monkeypatch.setattr(health, "create_client", supabase.create_client)
     response = instance.get("/health/ready")
     assert response.status_code == (503 if error else 200)
     assert "private" not in response.text
