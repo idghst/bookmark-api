@@ -1,3 +1,4 @@
+import asyncio
 import json
 from copy import deepcopy
 
@@ -97,6 +98,137 @@ class Store:
 
 def api(monkeypatch, store):
     return client(monkeypatch, store, BOOKMARK_USER_ID=OWNER)
+
+
+def test_snapshot_returns_all_resources_with_existing_serialization(monkeypatch):
+    store = Store()
+    instance = api(monkeypatch, store)
+    response = instance.get("/api/snapshot", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    snapshot = response.json()
+    assert set(snapshot) == {"bookmarks", "folders", "sections", "folderSections"}
+    for path, _, _, _ in CASES:
+        key = "folderSections" if path == "folder-sections" else path
+        assert snapshot[key] == instance.get("/api/" + path, headers=HEADERS).json()
+    assert snapshot["bookmarks"][0]["createdAt"] == BOOKMARK["created_at"]
+    assert snapshot["bookmarks"][0]["isFavorite"] is False
+    assert snapshot["folderSections"][0]["folderId"] == FOLDER_ID
+
+
+def test_snapshot_filters_every_resource_by_owner_and_reads_latest(monkeypatch):
+    store = Store()
+    for rows in store.tables.values():
+        rows.append({**rows[0], "id": "foreign", "user_id": "other"})
+    instance = api(monkeypatch, store)
+    response = instance.get("/api/snapshot?user_id=eq.other", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    for rows in response.json().values():
+        assert rows
+        assert all(row["userId"] == OWNER and row["id"] != "foreign" for row in rows)
+    assert {request.url.path.rsplit("/", 1)[-1] for request in store.requests} == {
+        "items",
+        "folders",
+        "sections",
+        "folder_sections",
+    }
+    assert all(
+        request.url.params["user_id"] == "eq." + OWNER for request in store.requests
+    )
+    store.tables["items"][0]["title"] = "Updated outside API"
+    assert (
+        instance.get("/api/snapshot", headers=HEADERS).json()["bookmarks"][0]["title"]
+        == "Updated outside API"
+    )
+
+
+@pytest.mark.parametrize(
+    "headers,code",
+    [({}, "authentication_required"), ({"X-Bookmark-Key": "wrong"}, "invalid_api_key")],
+)
+def test_snapshot_rejects_unauthorized_before_database(monkeypatch, headers, code):
+    def handle(request):
+        pytest.fail("Unauthenticated snapshot must not reach Supabase")
+
+    response = api(monkeypatch, handle).get("/api/snapshot", headers=headers)
+    assert response.status_code == 401
+    assert response.json()["code"] == code
+    assert set(response.json()) == {"code", "message", "request_id"}
+
+
+def test_snapshot_discovers_owner_once_for_all_resources(monkeypatch):
+    store = Store()
+    discovery = []
+
+    def handle(request):
+        if request.url.params["select"] == "user_id":
+            discovery.append(request)
+            return httpx.Response(200, json=[{"user_id": OWNER}])
+        return store(request)
+
+    response = client(monkeypatch, handle).get("/api/snapshot", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    assert len(discovery) == 8
+    for _, table, _, _ in CASES:
+        assert (
+            len(
+                [
+                    request
+                    for request in discovery
+                    if request.url.path.endswith("/" + table)
+                ]
+            )
+            == 2
+        )
+    assert len(store.requests) == 8
+
+
+def test_snapshot_reads_resources_in_parallel(monkeypatch):
+    started = set()
+    all_started = asyncio.Event()
+
+    async def handle(request):
+        started.add(request.url.path.rsplit("/", 1)[-1])
+        if len(started) == 4:
+            all_started.set()
+        await asyncio.wait_for(all_started.wait(), timeout=1)
+        return httpx.Response(200, json=[])
+
+    response = api(monkeypatch, handle).get("/api/snapshot", headers=HEADERS)
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "bookmarks": [],
+        "folders": [],
+        "sections": [],
+        "folderSections": [],
+    }
+
+
+@pytest.mark.parametrize(
+    "sqlcode,status,code",
+    [
+        ("42501", 403, "database_access_denied"),
+        ("unexpected", 502, "database_request_failed"),
+    ],
+)
+def test_snapshot_waits_for_all_reads_before_propagating_database_error(
+    monkeypatch, sqlcode, status, code
+):
+    finished = set()
+
+    async def handle(request):
+        table = request.url.path.rsplit("/", 1)[-1]
+        if table == "items":
+            return httpx.Response(400, json={"code": sqlcode, "message": "private"})
+        await asyncio.sleep(0.02)
+        finished.add(table)
+        return httpx.Response(200, json=[])
+
+    response = api(monkeypatch, handle).get("/api/snapshot", headers=HEADERS)
+    assert response.status_code == status
+    assert response.json()["code"] == code
+    assert set(response.json()) == {"code", "message", "request_id"}
+    assert "private" not in response.text
+    assert finished == {"folders", "sections", "folder_sections"}
 
 
 @pytest.mark.parametrize("path,table,row,payload", CASES)

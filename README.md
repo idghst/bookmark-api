@@ -54,6 +54,10 @@ API와 readiness 검사는 앱 lifespan 동안 하나의 HTTPX 연결 풀을 공
 - `GET /`, `GET /health`, `GET /health/live`
 - `GET /health/ready`: Supabase의 `bookmark.items` 읽기 연결 확인
 - `GET /api/v1/auth/me`
+- `GET /api/snapshot`: 한 번 인증한 뒤 네 리소스 목록을 병렬 조회합니다.
+  응답은 `{ "bookmarks": [], "folders": [], "sections": [], "folderSections": [] }`이며,
+  각 배열은 기존 개별 GET과 같은 필드·정렬·소유자 조건을 사용합니다.
+  캐시 없이 읽으며, 네 조회가 하나의 DB 트랜잭션 스냅샷을 보장하지는 않습니다.
 - `/api/bookmarks`, `/api/folders`, `/api/sections`, `/api/folder-sections`
   각각 GET/POST, `/{id}` PATCH/DELETE, `/reorder` POST
 - 폴더 삭제: `DELETE /api/folders/{id}?destination_folder_id={id}`

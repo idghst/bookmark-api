@@ -140,6 +140,17 @@ class FolderSectionUpdate(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
 
+class SnapshotOut(BaseModel):
+    bookmarks: list[BookmarkOut]
+    folders: list[FolderOut]
+    sections: list[SectionOut]
+    folder_sections: list[FolderSectionOut] = Field(
+        serialization_alias="folderSections"
+    )
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class PositionUpdate(BaseModel):
     id: str
     position: int
