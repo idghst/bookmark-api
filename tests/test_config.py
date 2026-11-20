@@ -110,43 +110,26 @@ def test_bookmark_url_allows_http_path_and_query() -> None:
 
 def test_configuration_and_secret_redaction():
     settings = Settings(
-        SUPABASE_SECRET_KEY="private-secret",
+        DATABASE_URL="postgresql://app:private-secret@db/bookmark",
         BOOKMARK_API_KEY="private-api",
         BOOKMARK_USER_ID="00000000-0000-0000-0000-000000000001",
     )
     assert settings.database_schema == "bookmark"
     assert "private" not in repr(settings)
     assert str(settings.BOOKMARK_USER_ID).endswith("0001")
-    assert "DATABASE_URL" not in Settings.model_fields
-    assert "SUPABASE_PUBLISHABLE_KEY" not in Settings.model_fields
-
-
-@pytest.mark.parametrize(
-    "value",
-    [
-        "",
-        "ftp://db.example.com",
-        "https://user:secret@db.example.com",
-        "https://db.example.com/rest/v1",
-        "https://db.example.com?token=secret",
-        123,
-    ],
-)
-def test_supabase_url_validation(value):
-    with pytest.raises(ValidationError):
-        Settings(SUPABASE_URL=value)
+    assert not any(name.startswith("SUPABASE") for name in Settings.model_fields)
 
 
 @pytest.mark.parametrize("value", ["", " ", None])
-def test_supabase_key_required(value):
+def test_database_url_required(value):
     with pytest.raises(ValidationError):
-        Settings(SUPABASE_SECRET_KEY=value)
+        Settings(DATABASE_URL=value)
 
 
 @pytest.mark.parametrize("value", [0, -1, 61, "bad", float("inf"), float("nan")])
 def test_timeout_is_bounded(value):
     with pytest.raises(ValidationError):
-        Settings(SUPABASE_TIMEOUT_SECONDS=value)
+        Settings(DATABASE_TIMEOUT_SECONDS=value)
 
 
 def test_optional_credentials_and_cache(monkeypatch):
@@ -154,36 +137,36 @@ def test_optional_credentials_and_cache(monkeypatch):
     assert settings.BOOKMARK_API_KEY is None
     assert settings.BOOKMARK_USER_ID is None
     first = get_settings()
-    monkeypatch.setenv("SUPABASE_URL", "https://other.example.com")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://other/bookmark")
     assert get_settings() is first
     clear_settings_cache()
-    assert get_settings().SUPABASE_URL == "https://other.example.com"
+    assert (
+        get_settings().DATABASE_URL.get_secret_value() == "postgresql://other/bookmark"
+    )
 
 
 def test_missing_config_and_errors_hide_secrets(monkeypatch):
-    monkeypatch.delenv("SUPABASE_URL")
+    monkeypatch.delenv("DATABASE_URL")
     with pytest.raises(ValidationError):
         Settings()
     with pytest.raises(ValidationError) as error:
         Settings(
-            SUPABASE_URL="https://db.example.com",
-            SUPABASE_SECRET_KEY="private-key",
-            SUPABASE_TIMEOUT_SECONDS=0,
+            DATABASE_URL="postgresql://app:private-key@db/bookmark",
+            DATABASE_TIMEOUT_SECONDS=0,
         )
     assert "private-key" not in str(error.value)
 
 
 def test_environment_overrides_dotenv(monkeypatch, tmp_path):
     env = tmp_path / ".env.local"
-    env.write_text(
-        "SUPABASE_URL=https://file.example.com\nSUPABASE_SECRET_KEY=file-secret\n"
-    )
-    assert Settings(_env_file=env).SUPABASE_URL == "https://db.example.com"
-    monkeypatch.delenv("SUPABASE_URL")
-    assert Settings(_env_file=env).SUPABASE_URL == "https://file.example.com"
-    assert (
-        Settings(
-            SUPABASE_URL="https://explicit.example.com", _env_file=env
-        ).SUPABASE_URL
-        == "https://explicit.example.com"
+    env.write_text("DATABASE_URL=postgresql://file/bookmark\n")
+
+    def url(**kwargs):
+        return Settings(_env_file=env, **kwargs).DATABASE_URL.get_secret_value()
+
+    assert url().startswith("postgresql://bookmark_app@")
+    monkeypatch.delenv("DATABASE_URL")
+    assert url() == "postgresql://file/bookmark"
+    assert url(DATABASE_URL="postgresql://explicit/bookmark") == (
+        "postgresql://explicit/bookmark"
     )

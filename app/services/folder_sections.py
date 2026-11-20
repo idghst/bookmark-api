@@ -2,7 +2,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.errors import ApiError
-from app.integrations.supabase import AuthContext
+from app.integrations.database import AuthContext
 from app.schemas import (
     FolderSectionCreate,
     FolderSectionOut,

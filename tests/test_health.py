@@ -1,10 +1,9 @@
-import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from app.core.config import Settings
 from app.main import create_app
-from tests.test_supabase import client
+from tests.test_database import client
 
 
 @pytest.mark.parametrize("path", ["/health", "/health/live"])
@@ -12,21 +11,15 @@ def test_liveness(path):
     assert TestClient(create_app()).get(path).json() == {"status": "ok"}
 
 
-@pytest.mark.parametrize("error", [False, True])
-def test_readiness_queries_supabase(monkeypatch, error):
-    def handle(request):
-        assert request.url.path == "/rest/v1/items"
-        assert request.url.params["limit"] == "1"
-        return (
-            httpx.Response(503, text="private credentials")
-            if error
-            else httpx.Response(200, json=[])
-        )
+def test_readiness_queries_database(db, app_database_url):
+    assert client(app_database_url).get("/health/ready").json() == {"status": "ok"}
 
-    instance = client(monkeypatch, handle)
-    response = instance.get("/health/ready")
-    assert response.status_code == (503 if error else 200)
-    assert "private" not in response.text
+
+def test_readiness_hides_database_failure():
+    response = client().get("/health/ready")
+    assert response.status_code == 503
+    assert response.json()["code"] == "dependency_unavailable"
+    assert "127.0.0.1" not in response.text
 
 
 def test_factory_and_cors():
