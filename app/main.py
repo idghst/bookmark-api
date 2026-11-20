@@ -10,7 +10,7 @@ from app.api.routes.resources import router as resource_router
 from app.core.config import Settings, get_settings
 from app.core.errors import register_exception_handlers
 from app.core.logging import configure_logging
-from app.integrations import supabase
+from app.integrations import database
 from app.middleware.request_context import RequestContextMiddleware
 
 
@@ -20,12 +20,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        async with supabase.create_client(settings) as client:
-            app.state.database_client = client
+        async with database.create_pool(settings) as pool:
+            app.state.database_pool = pool
             try:
                 yield
             finally:
-                app.state.database_client = None
+                app.state.database_pool = None
 
     app = FastAPI(
         title=settings.app_name,

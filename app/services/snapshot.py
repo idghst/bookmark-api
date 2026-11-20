@@ -1,6 +1,6 @@
 import asyncio
 
-from app.integrations.supabase import AuthContext
+from app.integrations.database import AuthContext
 from app.schemas import SnapshotOut
 from app.services.bookmarks import list_bookmarks
 from app.services.folder_sections import list_folder_sections

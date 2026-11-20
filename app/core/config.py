@@ -42,9 +42,8 @@ class Settings(BaseSettings):
         hide_input_in_errors=True,
     )
 
-    SUPABASE_URL: str
-    SUPABASE_SECRET_KEY: SecretStr
-    SUPABASE_TIMEOUT_SECONDS: float = Field(default=10, gt=0, le=60)
+    DATABASE_URL: SecretStr
+    DATABASE_TIMEOUT_SECONDS: float = Field(default=10, gt=0, le=60)
     BOOKMARK_API_KEY: SecretStr | None = None
     BOOKMARK_USER_ID: UUID | None = None
 
@@ -55,17 +54,12 @@ class Settings(BaseSettings):
     ]
 
     @field_validator(
-        "BOOKMARK_API_KEY", "BOOKMARK_USER_ID", "SUPABASE_SECRET_KEY", mode="before"
+        "BOOKMARK_API_KEY", "BOOKMARK_USER_ID", "DATABASE_URL", mode="before"
     )
     @classmethod
     def normalize_blank_optional(cls, value: object) -> object:
         raw = value.get_secret_value() if isinstance(value, SecretStr) else value
         return None if isinstance(raw, str) and not raw.strip() else value
-
-    @field_validator("SUPABASE_URL", mode="before")
-    @classmethod
-    def validate_supabase_origin(cls, value: object) -> str:
-        return require_http_origin(value, allow_root_path=True).rstrip("/")
 
 
 @lru_cache

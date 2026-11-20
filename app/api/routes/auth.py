@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from app.integrations.supabase import AuthContext, get_resource_auth_context
+from app.integrations.database import AuthContext, get_resource_auth_context
 from app.schemas import AuthMeOut
 
 router = APIRouter(prefix="/auth", tags=["auth"])

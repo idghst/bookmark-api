@@ -1,0 +1,30 @@
+# 맥미니 배포: proxy(web 네트워크) → bookmark-api:8000. DB는 공용 Postgres가 bookmark-internal 에 db 별칭으로 붙는다.
+# 처음 한 번: docker network create bookmark-internal
+# env 파일 기본값은 저장소 루트의 .env.macmini. 다른 위치면 BOOKMARK_ENV_FILE=<절대 경로> docker compose up -d
+name: bookmark
+services:
+  bookmark-api:
+    build: .
+    image: bookmark-api:macmini
+    container_name: bookmark-api  # proxy 가 web 네트워크에서 이 이름으로 찾는다
+    restart: unless-stopped
+    env_file: ${BOOKMARK_ENV_FILE:-.env.macmini}
+    expose: ["8000"]
+    networks: [web, internal]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/live', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+networks:
+  web:
+    external: true
+  internal:
+    name: bookmark-internal
+    external: true

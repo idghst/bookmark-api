@@ -2,8 +2,8 @@ from typing import Any
 from uuid import uuid4
 
 from app.core.errors import ApiError
-from app.integrations import supabase
-from app.integrations.supabase import AuthContext
+from app.integrations import database
+from app.integrations.database import AuthContext
 from app.schemas import (
     FolderCreate,
     FolderOut,
@@ -107,15 +107,11 @@ async def delete_folder(
             "folder_destination_invalid",
             "A folder cannot be its own deletion destination",
         )
-    await supabase.request(
-        auth.client,
-        "POST",
-        "rpc/delete_folder",
-        body={
-            "p_folder_id": folder_id,
-            "p_destination_folder_id": destination_folder_id,
-            "p_user_id": auth.user.id,
-        },
+    await database.query(
+        auth.conn,
+        "select id from bookmark.delete_folder(p_folder_id => %s, "
+        "p_destination_folder_id => %s, p_user_id => %s)",
+        [folder_id, destination_folder_id, auth.user.id],
     )
 
 

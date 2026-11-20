@@ -1,10 +1,10 @@
 from typing import Annotated
 
-import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
+from app.core.config import Settings, get_settings
 from app.core.errors import ApiError
-from app.integrations.supabase import get_database_client, request
+from app.integrations import database
 
 router = APIRouter(prefix="/health", tags=["health"])
 
@@ -20,10 +20,12 @@ async def liveness() -> dict[str, str]:
 
 
 async def probe_database(
-    client: Annotated[httpx.AsyncClient, Depends(get_database_client)],
+    request: Request,
+    settings: Annotated[Settings, Depends(get_settings)],
 ) -> None:
     try:
-        await request(client, "GET", "items", params={"select": "id", "limit": "1"})
+        async with database.connect(request, settings) as conn:
+            await database.query(conn, "select id from bookmark.items limit 1")
     except ApiError as error:
         raise ApiError(
             503, "dependency_unavailable", "Database is unavailable"
